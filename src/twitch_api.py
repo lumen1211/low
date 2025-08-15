@@ -22,7 +22,8 @@ class TwitchAPI:
             await self.session.close()
 
     async def gql(self, operation: str, variables: Dict[str, Any]) -> Any:
-        assert self.session is not None
+        if not self.session or self.session.closed:
+            raise RuntimeError("Session not started; call start() first")
         h = self.ops.get(operation, "")
         if not h or h.startswith("actual_hash"):
             raise RuntimeError(f"Persisted hash for {operation} not set in ops/ops.json")
@@ -49,7 +50,22 @@ class TwitchAPI:
                 await asyncio.sleep(min(60, 2**attempt)); attempt += 1
                 if attempt > 5: raise
 
-    async def viewer_dashboard(self) -> Any: return await self.gql("ViewerDropsDashboard", {})
-    async def inventory(self) -> Any: return await self.gql("Inventory", {})
-    async def increment(self, channel_id: str) -> Any: return await self.gql("IncrementDropCurrentSessionProgress", {"channelID": channel_id})
-    async def claim(self, drop_instance_id: str) -> Any: return await self.gql("ClaimDropReward", {"dropInstanceID": drop_instance_id})
+    async def viewer_dashboard(self) -> Any:
+        await self.start()
+        return await self.gql("ViewerDropsDashboard", {})
+
+    async def inventory(self) -> Any:
+        await self.start()
+        return await self.gql("Inventory", {})
+
+    async def increment(self, channel_id: str) -> Any:
+        await self.start()
+        return await self.gql(
+            "IncrementDropCurrentSessionProgress", {"channelID": channel_id}
+        )
+
+    async def claim(self, drop_instance_id: str) -> Any:
+        await self.start()
+        return await self.gql(
+            "ClaimDropReward", {"dropInstanceID": drop_instance_id}
+        )
