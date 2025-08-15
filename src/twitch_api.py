@@ -28,6 +28,7 @@ class TwitchAPI:
             raise RuntimeError(f"Persisted hash for {operation} not set in ops/ops.json")
         payload = {"operationName": operation, "variables": variables, "extensions": {"persistedQuery": {"version": 1, "sha256Hash": h}}}
         attempt = 0
+        retry_429 = 0
         while True:
             try:
                 async with self.session.post(GQL, json=payload, proxy=self.proxy, headers={
@@ -36,7 +37,11 @@ class TwitchAPI:
                     "Content-Type": "application/json",
                 }) as r:
                     if r.status == 429:
-                        await asyncio.sleep(min(60, 2**attempt)); attempt += 1; continue
+                        await asyncio.sleep(min(60, 2**retry_429))
+                        retry_429 += 1
+                        if retry_429 >= 5:
+                            raise RuntimeError("GQL 429: Too many requests")
+                        continue
                     if 200 <= r.status < 300:
                         data = await r.json()
                         if isinstance(data, list): data = data[0]
