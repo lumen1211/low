@@ -16,7 +16,6 @@ from .accounts import load_accounts, COOKIES_DIR
 from .onboarding import bulk_onboarding
 from .onboarding_webview import WebOnboarding, Account as WVAccount
 from .miner import run_account  # <- асинхронный воркер (aiohttp)
-from .ops import load_ops, missing_ops
 
 
 class MainWindow(QMainWindow):
