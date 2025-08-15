@@ -46,6 +46,28 @@ async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
     # минимальный дашборд дропсов для текущего пользователя
     return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
 
+
+def _load_channels() -> list[str]:
+    """Возвращает список каналов из channels.txt (по одному в строке)."""
+    fp = Path("channels.txt")
+    if not fp.exists():
+        return []
+    lines = fp.read_text(encoding="utf-8").splitlines()
+    return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+
+
+async def get_live_channels(session: aiohttp.ClientSession, channels: list[str]) -> list[str]:
+    """Проверяем live-статус заданных каналов через Helix /streams."""
+    if not channels:
+        return []
+    params = [("user_login", ch) for ch in channels]
+    async with session.get("https://api.twitch.tv/helix/streams", params=params) as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+        items = data.get("data") or []
+        return [itm.get("user_login", "").lower() for itm in items]
+
 async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
     """
     Шаг 2a: без видео. Только GQL-дискавери кампаний для аккаунта.
@@ -109,9 +131,29 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
             await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
             await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-            # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
+            channels = _load_channels()
+            if not channels:
+                await queue.put((login, "status", {"status": "NoChannels", "note": "channels.txt not found"}))
+                return
+
+            idx = 0
+            current = channels[idx]
+            await queue.put((login, "status", {"status": "Watching", "note": f"{current}"}))
+            progress = 0
+
             while not stop_evt.is_set():
-                await asyncio.sleep(1.0)
+                live = await get_live_channels(session, [current])
+                if current.lower() not in live:
+                    idx = (idx + 1) % len(channels)
+                    current = channels[idx]
+                    progress = 0
+                    msg = f"switching to {current}"  # channel offline
+                    print(f"[{login}] {msg}")
+                    await queue.put((login, "status", {"status": "Switch", "note": msg}))
+                    continue
+                progress = (progress + 5) % 100
+                await queue.put((login, "progress", {"pct": progress, "remain": 100 - progress}))
+                await asyncio.sleep(15.0)
 
             await queue.put((login, "status", {"status": "Stopped"}))
 
