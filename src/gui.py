@@ -2,11 +2,12 @@
 from __future__ import annotations
 import asyncio, json
 from pathlib import Path
+from datetime import datetime
 
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QLineEdit, QComboBox
 )
 from PySide6.QtCore import QTimer
 
@@ -51,7 +52,18 @@ class MainWindow(QMainWindow):
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         v.addWidget(self.tbl)
 
+        flt = QHBoxLayout()
+        flt.addWidget(QLabel("Login:"))
+        self.filter_login = QLineEdit(); self.filter_login.textChanged.connect(self.refresh_log_display)
+        flt.addWidget(self.filter_login)
+        flt.addWidget(QLabel("Level:"))
+        self.filter_level = QComboBox(); self.filter_level.addItems(["ALL", "INFO", "ERROR"]); self.filter_level.currentTextChanged.connect(self.refresh_log_display)
+        flt.addWidget(self.filter_level)
+        v.addLayout(flt)
+
         self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
+        self.log_entries: list[dict] = []
+        self.max_log_entries = 500
 
         self.populate(); self.refresh_totals()
 
@@ -80,7 +92,28 @@ class MainWindow(QMainWindow):
             if self.tbl.item(r,1).text() == login: return r
         return -1
 
-    def log_line(self, s: str): self.log.append(s)
+    def log_line(self, msg: str, login: str = "", level: str = "INFO"):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_entries.append({"ts": ts, "login": login, "level": level, "msg": msg})
+        if len(self.log_entries) > self.max_log_entries:
+            self.log_entries = self.log_entries[-self.max_log_entries:]
+        self.refresh_log_display()
+
+    def refresh_log_display(self):
+        login_f = self.filter_login.text().strip().lower()
+        level_f = self.filter_level.currentText()
+        lines = []
+        for e in self.log_entries:
+            if login_f and login_f not in e["login"].lower():
+                continue
+            if level_f != "ALL" and e["level"] != level_f:
+                continue
+            color = "red" if e["level"] == "ERROR" else "black"
+            login_part = f"[{e['login']}]" if e["login"] else ""
+            lines.append(
+                f"<span style='color:{color}'>[{e['ts']}] [{e['level']}] {login_part} {e['msg']}</span>"
+            )
+        self.log.setHtml("<br>".join(lines))
 
     def refresh_totals(self):
         active = sum(1 for a in self.accounts if a.status=="Running")
@@ -104,7 +137,7 @@ class MainWindow(QMainWindow):
             cookie_file = Path(COOKIES_DIR) / f"{login}.json"
             if not cookie_file.exists():
                 self.tbl.item(r,2).setText("NO COOKIES")
-                self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
+                self.log_line(f"NO COOKIES — {cookie_file} not found", login=login, level="ERROR")
                 miss += 1; continue
 
             token = ""
@@ -116,12 +149,12 @@ class MainWindow(QMainWindow):
                         break
             except Exception as e:
                 self.tbl.item(r,2).setText("BAD COOKIES")
-                self.log_line(f"[{login}] BAD COOKIES — {e}")
+                self.log_line(f"BAD COOKIES — {e}", login=login, level="ERROR")
                 other += 1; continue
 
             if not token:
                 self.tbl.item(r,2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
+                self.log_line("NO TOKEN in cookies", login=login, level="ERROR")
                 miss += 1; continue
 
             try:
@@ -135,19 +168,19 @@ class MainWindow(QMainWindow):
                     j = resp.json()
                     login_resp = j.get("login","?")
                     scopes = ",".join(j.get("scopes",[]))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
+                    self.log_line(f"OK — login={login_resp} scopes=[{scopes}]", login=login)
                     ok += 1
                 elif resp.status_code in (401, 403):
                     self.tbl.item(r,2).setText("EXPIRED")
-                    self.log_line(f"[{login}] EXPIRED — token invalid")
+                    self.log_line("EXPIRED — token invalid", login=login, level="ERROR")
                     exp += 1
                 else:
                     self.tbl.item(r,2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
+                    self.log_line(f"HTTP {resp.status_code}: {resp.text[:120]}", login=login, level="ERROR")
                     other += 1
             except Exception as e:
                 self.tbl.item(r,2).setText("ERROR")
-                self.log_line(f"[{login}] ERROR — {e}")
+                self.log_line(f"ERROR — {e}", login=login, level="ERROR")
                 other += 1
 
         self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
@@ -157,9 +190,9 @@ class MainWindow(QMainWindow):
         result = res.get("result", "")
         note = res.get("note", "")
         if result == "STEP":
-            self.log_line(f"[{login}] {note}")
+            self.log_line(note, login=login)
         else:
-            self.log_line(f"[{login}] {result} — {note}")
+            self.log_line(f"{result} — {note}", login=login)
         if result == "DELETE":
             self._remove_account_from_ui(login)
 
@@ -211,7 +244,7 @@ class MainWindow(QMainWindow):
                 self.tbl.item(r,2).setText(p.get("status",""))
                 note = p.get("note")
                 if note:
-                    self.log_line(f"[{login}] {note}")
+                    self.log_line(note, login=login)
             elif kind == "campaign":
                 self.tbl.item(r,3).setText(p.get("camp","") or "—")
                 self.tbl.item(r,4).setText(p.get("game","") or "—")
@@ -221,10 +254,10 @@ class MainWindow(QMainWindow):
             elif kind == "claimed":
                 self.metrics["claimed"] += 1
                 self.tbl.item(r,7).setText(p.get("at",""))
-                self.log_line(f"[{login}] Claimed {p.get('drop','')}")
+                self.log_line(f"Claimed {p.get('drop','')}", login=login)
             elif kind == "error":
                 self.metrics["errors"] += 1
-                self.log_line(f"[{login}] ERROR: {p.get('msg','')}")
+                self.log_line(f"ERROR: {p.get('msg','')}", login=login, level="ERROR")
             self.refresh_totals()
 
     # ── короткий «тик» asyncio-цикла, чтобы задачи выполнялись ────────────────
