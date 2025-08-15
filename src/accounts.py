@@ -1,10 +1,11 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
-import csv, json
+import csv, json, logging
 from .types import Account
 
 COOKIES_DIR = Path("cookies"); COOKIES_DIR.mkdir(exist_ok=True)
+logger = logging.getLogger(__name__)
 
 def _parse_txt(path: Path) -> list[Account]:
     res: list[Account] = []
@@ -48,6 +49,7 @@ def auth_token_from_cookies(login: str) -> Optional[str]:
         for c in cookies:
             if c.get("name") == "auth-token":
                 return c.get("value")
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.error("Failed to load auth token for %s: %s", login, e)
         return None
     return None
