@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, json
 from pathlib import Path
 
-import requests
+import aiohttp
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
@@ -93,64 +93,93 @@ class MainWindow(QMainWindow):
         self.refresh_totals()
 
     # ── actions ────────────────────────────────────────────────────────────────
+
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
+        # запуск асинхронного воркера
+        self.loop.create_task(self._check_gql_async())
+
+    async def _check_gql_async(self):
         ok = exp = miss = other = 0
-        for a in self.accounts:
-            login = a.login
-            r = self.row_of(login)
-            if r < 0: continue
+        async with aiohttp.ClientSession() as session:
+            for a in self.accounts:
+                login = a.login
+                r = self.row_of(login)
+                if r < 0:
+                    continue
 
-            cookie_file = Path(COOKIES_DIR) / f"{login}.json"
-            if not cookie_file.exists():
-                self.tbl.item(r,2).setText("NO COOKIES")
-                self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
-                miss += 1; continue
+                cookie_file = Path(COOKIES_DIR) / f"{login}.json"
+                if not cookie_file.exists():
+                    def cb_no_cookies():
+                        self.tbl.item(r,2).setText("NO COOKIES")
+                        self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
+                    self.loop.call_soon_threadsafe(cb_no_cookies)
+                    miss += 1
+                    continue
 
-            token = ""
-            try:
-                data = json.loads(cookie_file.read_text(encoding="utf-8"))
-                for c in data:
-                    if c.get("name") == "auth-token":
-                        token = c.get("value") or ""
-                        break
-            except Exception as e:
-                self.tbl.item(r,2).setText("BAD COOKIES")
-                self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1; continue
-
-            if not token:
-                self.tbl.item(r,2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1; continue
-
-            try:
-                resp = requests.get(
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {token}"},
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    self.tbl.item(r,2).setText("OK")
-                    j = resp.json()
-                    login_resp = j.get("login","?")
-                    scopes = ",".join(j.get("scopes",[]))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
-                    ok += 1
-                elif resp.status_code in (401, 403):
-                    self.tbl.item(r,2).setText("EXPIRED")
-                    self.log_line(f"[{login}] EXPIRED — token invalid")
-                    exp += 1
-                else:
-                    self.tbl.item(r,2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
+                token = ""
+                try:
+                    data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                    for c in data:
+                        if c.get("name") == "auth-token":
+                            token = c.get("value") or ""
+                            break
+                except Exception as e:
+                    def cb_bad_cookies():
+                        self.tbl.item(r,2).setText("BAD COOKIES")
+                        self.log_line(f"[{login}] BAD COOKIES — {e}")
+                    self.loop.call_soon_threadsafe(cb_bad_cookies)
                     other += 1
-            except Exception as e:
-                self.tbl.item(r,2).setText("ERROR")
-                self.log_line(f"[{login}] ERROR — {e}")
-                other += 1
+                    continue
 
-        self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
+                if not token:
+                    def cb_no_token():
+                        self.tbl.item(r,2).setText("NO TOKEN")
+                        self.log_line(f"[{login}] NO TOKEN in cookies")
+                    self.loop.call_soon_threadsafe(cb_no_token)
+                    miss += 1
+                    continue
+
+                try:
+                    resp = await session.get(
+                        "https://id.twitch.tv/oauth2/validate",
+                        headers={"Authorization": f"OAuth {token}"},
+                        timeout=aiohttp.ClientTimeout(total=6),
+                    )
+                    if resp.status == 200:
+                        j = await resp.json()
+                        login_resp = j.get("login","?")
+                        scopes = ",".join(j.get("scopes",[]))
+                        def cb_ok():
+                            self.tbl.item(r,2).setText("OK")
+                            self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
+                        self.loop.call_soon_threadsafe(cb_ok)
+                        ok += 1
+                    elif resp.status in (401, 403):
+                        def cb_expired():
+                            self.tbl.item(r,2).setText("EXPIRED")
+                            self.log_line(f"[{login}] EXPIRED — token invalid")
+                        self.loop.call_soon_threadsafe(cb_expired)
+                        exp += 1
+                    else:
+                        text = await resp.text()
+                        def cb_http():
+                            self.tbl.item(r,2).setText(f"HTTP {resp.status}")
+                            self.log_line(f"[{login}] HTTP {resp.status}: {text[:120]}")
+                        self.loop.call_soon_threadsafe(cb_http)
+                        other += 1
+                except Exception as e:
+                    def cb_error():
+                        self.tbl.item(r,2).setText("ERROR")
+                        self.log_line(f"[{login}] ERROR — {e}")
+                    self.loop.call_soon_threadsafe(cb_error)
+                    other += 1
+
+        self.loop.call_soon_threadsafe(
+            lambda: self.log_line(
+                f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}"
+            )
+        )
 
     def _on_onboarding_progress(self, res: dict):
         login = res.get("login", "?")
