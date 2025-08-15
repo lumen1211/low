@@ -5,8 +5,17 @@ from pathlib import Path
 
 import requests
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QTextEdit,
+    QComboBox,
 )
 from PySide6.QtCore import QTimer
 
@@ -32,6 +41,8 @@ class MainWindow(QMainWindow):
         self.tasks: dict[str, asyncio.Task] = {}
         self.stops: dict[str, asyncio.Event] = {}
         self.metrics = {"claimed": 0, "errors": 0}
+        # выпадающие списки кампаний по логину
+        self.cmb_campaigns: dict[str, QComboBox] = {}
 
         # ── UI ──────────────────────────────────────────────────────────────────
         root = QWidget(); self.setCentralWidget(root)
@@ -72,13 +83,35 @@ class MainWindow(QMainWindow):
         self.tbl.setRowCount(0)
         for a in self.accounts:
             r = self.tbl.rowCount(); self.tbl.insertRow(r)
-            for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
-                self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
+            cols = [a.label, a.login, a.status, "", "", "0%", "0", ""]
+            for i, val in enumerate(cols):
+                if i == 3:
+                    cmb = QComboBox()
+                    cmb.currentIndexChanged.connect(
+                        lambda idx, login=a.login: self._on_campaign_changed(login)
+                    )
+                    self.tbl.setCellWidget(r, i, cmb)
+                    self.cmb_campaigns[a.login] = cmb
+                else:
+                    self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
 
     def row_of(self, login: str) -> int:
         for r in range(self.tbl.rowCount()):
             if self.tbl.item(r,1).text() == login: return r
         return -1
+
+    def _on_campaign_changed(self, login: str):
+        cmb = self.cmb_campaigns.get(login)
+        if not cmb:
+            return
+        idx = cmb.currentIndex()
+        cid = cmb.itemData(idx)
+        name = cmb.currentText()
+        for a in self.accounts:
+            if a.login == login:
+                a.campaign_id = cid or ""
+                a.active_campaign = name or ""
+                break
 
     def log_line(self, s: str): self.log.append(s)
 
@@ -90,6 +123,7 @@ class MainWindow(QMainWindow):
         r = self.row_of(login)
         if r >= 0: self.tbl.removeRow(r)
         self.accounts = [a for a in self.accounts if a.login != login]
+        self.cmb_campaigns.pop(login, None)
         self.refresh_totals()
 
     # ── actions ────────────────────────────────────────────────────────────────
@@ -181,12 +215,19 @@ class MainWindow(QMainWindow):
         self.log_line("Onboarding (WebView) завершён; cookies сохранены.")
 
     def start_all(self):
+        # очищаем завершённые задачи
+        for login, t in list(self.tasks.items()):
+            if t.done():
+                self.tasks.pop(login, None)
         # создаём/пересоздаём задачи в нашем asyncio-цикле
         for a in self.accounts:
-            if a.login in self.tasks: continue
+            if a.login in self.tasks:
+                continue
             stop = asyncio.Event()
             self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
+            t = self.loop.create_task(
+                run_account(a.login, a.proxy, self.queue, stop, a.campaign_id or None)
+            )
             self.tasks[a.login] = t
             a.status = "Running"
         self.refresh_totals()
@@ -212,8 +253,20 @@ class MainWindow(QMainWindow):
                 note = p.get("note")
                 if note:
                     self.log_line(f"[{login}] {note}")
+            elif kind == "campaigns":
+                cmb = self.cmb_campaigns.get(login)
+                if cmb:
+                    cmb.clear()
+                    for cid, name in p.get("list", []):
+                        cmb.addItem(name, cid)
             elif kind == "campaign":
-                self.tbl.item(r,3).setText(p.get("camp","") or "—")
+                cmb = self.cmb_campaigns.get(login)
+                if cmb:
+                    cid = p.get("id")
+                    if cid is not None:
+                        idx = cmb.findData(cid)
+                        if idx >= 0:
+                            cmb.setCurrentIndex(idx)
                 self.tbl.item(r,4).setText(p.get("game","") or "—")
             elif kind == "progress":
                 self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
