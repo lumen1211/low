@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, json
 from pathlib import Path
 
-import requests
+import aiohttp
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
@@ -95,60 +95,73 @@ class MainWindow(QMainWindow):
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
+        self.loop.create_task(self._check_gql())
+
+    async def _check_gql(self):
         ok = exp = miss = other = 0
-        for a in self.accounts:
-            login = a.login
-            r = self.row_of(login)
-            if r < 0: continue
 
-            cookie_file = Path(COOKIES_DIR) / f"{login}.json"
-            if not cookie_file.exists():
-                self.tbl.item(r,2).setText("NO COOKIES")
-                self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
-                miss += 1; continue
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
+            async def process_account(a: Account):
+                nonlocal ok, exp, miss, other
 
-            token = ""
-            try:
-                data = json.loads(cookie_file.read_text(encoding="utf-8"))
-                for c in data:
-                    if c.get("name") == "auth-token":
-                        token = c.get("value") or ""
-                        break
-            except Exception as e:
-                self.tbl.item(r,2).setText("BAD COOKIES")
-                self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1; continue
+                login = a.login
+                r = self.row_of(login)
+                if r < 0:
+                    return
 
-            if not token:
-                self.tbl.item(r,2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1; continue
+                cookie_file = Path(COOKIES_DIR) / f"{login}.json"
+                if not cookie_file.exists():
+                    self.tbl.item(r,2).setText("NO COOKIES")
+                    self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
+                    miss += 1
+                    return
 
-            try:
-                resp = requests.get(
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {token}"},
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    self.tbl.item(r,2).setText("OK")
-                    j = resp.json()
-                    login_resp = j.get("login","?")
-                    scopes = ",".join(j.get("scopes",[]))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
-                    ok += 1
-                elif resp.status_code in (401, 403):
-                    self.tbl.item(r,2).setText("EXPIRED")
-                    self.log_line(f"[{login}] EXPIRED — token invalid")
-                    exp += 1
-                else:
-                    self.tbl.item(r,2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
+                token = ""
+                try:
+                    data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                    for c in data:
+                        if c.get("name") == "auth-token":
+                            token = c.get("value") or ""
+                            break
+                except Exception as e:
+                    self.tbl.item(r,2).setText("BAD COOKIES")
+                    self.log_line(f"[{login}] BAD COOKIES — {e}")
                     other += 1
-            except Exception as e:
-                self.tbl.item(r,2).setText("ERROR")
-                self.log_line(f"[{login}] ERROR — {e}")
-                other += 1
+                    return
+
+                if not token:
+                    self.tbl.item(r,2).setText("NO TOKEN")
+                    self.log_line(f"[{login}] NO TOKEN in cookies")
+                    miss += 1
+                    return
+
+                try:
+                    resp = await session.get(
+                        "https://id.twitch.tv/oauth2/validate",
+                        headers={"Authorization": f"OAuth {token}"},
+                    )
+                    if resp.status == 200:
+                        self.tbl.item(r,2).setText("OK")
+                        j = await resp.json()
+                        login_resp = j.get("login", "?")
+                        scopes = ",".join(j.get("scopes", []))
+                        self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
+                        ok += 1
+                    elif resp.status in (401, 403):
+                        self.tbl.item(r,2).setText("EXPIRED")
+                        self.log_line(f"[{login}] EXPIRED — token invalid")
+                        exp += 1
+                    else:
+                        text = await resp.text()
+                        self.tbl.item(r,2).setText(f"HTTP {resp.status}")
+                        self.log_line(f"[{login}] HTTP {resp.status}: {text[:120]}")
+                        other += 1
+                except Exception as e:
+                    self.tbl.item(r,2).setText("ERROR")
+                    self.log_line(f"[{login}] ERROR — {e}")
+                    other += 1
+
+            await asyncio.gather(*(process_account(a) for a in self.accounts))
 
         self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
 
