@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
                 self.tbl.item(r,6).setText(str(p.get("remain",0)))
             elif kind == "claimed":
                 self.metrics["claimed"] += 1
-                self.tbl.item(r,7).setText(p.get("at",""))
+                self.tbl.item(r,7).setText(str(p.get("at","")))
                 self.log_line(f"[{login}] Claimed {p.get('drop','')}")
             elif kind == "error":
                 self.metrics["errors"] += 1
