@@ -5,8 +5,11 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any
+from datetime import datetime
 
 import aiohttp
+
+from .twitch_api import TwitchAPI
 
 GQL_URL = "https://gql.twitch.tv/gql"
 CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
@@ -109,11 +112,58 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
             await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
             await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-            # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
-            while not stop_evt.is_set():
-                await asyncio.sleep(1.0)
-
-            await queue.put((login, "status", {"status": "Stopped"}))
-
         except Exception as e:
             await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+
+    # дальнейшая работа через TwitchAPI — мониторинг дропсов
+    api = TwitchAPI(token, proxy or "")
+    await api.start()
+    try:
+        while not stop_evt.is_set():
+            try:
+                inv = await api.inventory()
+                drops = []
+                d = (inv or {}).get("data") or {}
+                vd = d.get("viewer") or d.get("currentUser") or {}
+                inv2 = vd.get("inventory") or vd
+                tbd = inv2.get("timeBasedDrops") or {}
+                if isinstance(tbd, dict):
+                    if isinstance(tbd.get("edges"), list):
+                        drops = [e.get("node") or e for e in tbd["edges"]]
+                    elif isinstance(tbd.get("items"), list):
+                        drops = tbd["items"]
+                elif isinstance(tbd, list):
+                    drops = tbd
+
+                if drops:
+                    drop = drops[0]
+                    req = drop.get("requiredMinutesWatched") or drop.get("requiredMinutes") or 0
+                    cur = (
+                        (drop.get("self") or {}).get("currentMinutesWatched")
+                        or drop.get("currentMinutesWatched")
+                        or 0
+                    )
+                    pct = float(cur) / req * 100 if req else 0.0
+                    remain = max(int(req - cur), 0)
+                    await queue.put((login, "progress", {"pct": pct, "remain": remain}))
+
+                    if req and cur >= req:
+                        drop_id = (
+                            (drop.get("self") or {}).get("dropInstanceID")
+                            or drop.get("dropInstanceID")
+                            or ""
+                        )
+                        try:
+                            await api.claim(drop_id)
+                            ts = datetime.utcnow().isoformat(timespec="seconds")
+                            name = drop.get("name") or drop.get("id", "")
+                            await queue.put((login, "claimed", {"drop": name, "at": ts}))
+                        except Exception as e:
+                            await queue.put((login, "error", {"msg": f"claim error: {e}"}))
+                await asyncio.sleep(30.0)
+            except Exception as e:
+                await queue.put((login, "error", {"msg": f"inventory error: {e}"}))
+                await asyncio.sleep(30.0)
+        await queue.put((login, "status", {"status": "Stopped"}))
+    finally:
+        await api.close()
