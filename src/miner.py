@@ -43,10 +43,11 @@ async def _gql(session: aiohttp.ClientSession, op_name: str, variables: Dict[str
         return await r.json()
 
 async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
-    # минимальный дашборд дропсов для текущего пользователя
+    """Минимальный дашборд дропсов для текущего пользователя.
+    Возвращает сырой ответ Twitch GQL."""
     return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
 
-async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
+async def run_account(login: str, proxy: Optional[str], queue, cmd_q: asyncio.Queue, stop_evt: asyncio.Event):
     """
     Шаг 2a: без видео. Только GQL-дискавери кампаний для аккаунта.
     - читает cookies/<login>.json -> auth-token
@@ -72,7 +73,7 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
         try:
             data = await _discover_campaign(session)
 
-            # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
+            campaigns_info: list[Dict[str, Any]] = []
             camp_name = ""
             game_name = ""
             try:
@@ -81,37 +82,103 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
                 drops = vd.get("dropsDashboard") or vd.get("drops") or vd
 
                 if isinstance(drops, dict):
-                    # сначала пробуем текущую/активные кампании
-                    campaigns = []
+                    raw_camps = []
                     if isinstance(drops.get("currentCampaigns"), list):
-                        campaigns = drops["currentCampaigns"]
+                        raw_camps = drops["currentCampaigns"]
                     elif isinstance(drops.get("availableCampaigns"), list):
-                        campaigns = drops["availableCampaigns"]
+                        raw_camps = drops["availableCampaigns"]
                     elif isinstance(drops.get("campaigns"), list):
-                        campaigns = drops["campaigns"]
+                        raw_camps = drops["campaigns"]
 
-                    if campaigns:
-                        c0 = campaigns[0]
-                        camp_name = c0.get("name") or c0.get("displayName") or c0.get("id","")
-                        game = c0.get("game") or c0.get("gameTitle") or {}
-                        game_name = (game.get("name") or game.get("displayName") or "")
-                # fallback — по тексту
+                    for c in raw_camps:
+                        cid = c.get("id", "")
+                        cname = c.get("name") or c.get("displayName") or cid
+                        game = c.get("game") or c.get("gameTitle") or {}
+                        gname = (game.get("name") or game.get("displayName") or "")
+
+                        channels: list[str] = []
+                        for ck in [
+                            "allowlistedChannels",
+                            "allowList",
+                            "allowedChannels",
+                            "channels",
+                        ]:
+                            if isinstance(c.get(ck), list):
+                                for ch in c[ck]:
+                                    nm = (
+                                        ch.get("name")
+                                        or ch.get("displayName")
+                                        or ch.get("login")
+                                        or ch.get("channelLogin")
+                                        or ""
+                                    )
+                                    if nm:
+                                        channels.append(nm)
+                                if channels:
+                                    break
+                        campaigns_info.append(
+                            {"id": cid, "name": cname, "game": gname, "channels": channels}
+                        )
+
+                    if campaigns_info:
+                        camp_name = campaigns_info[0]["name"]
+                        game_name = campaigns_info[0]["game"]
+
                 if not camp_name:
                     import re, json as _json
+
                     txt = _json.dumps(drops)
-                    m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"name"\s*:\s*"([^"]+)"', txt)
-                    if m: camp_name = m.group(1)
-                    m2 = re.search(r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
-                    if m2: game_name = m2.group(1)
+                    m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(
+                        r'"name"\s*:\s*"([^"]+)"', txt
+                    )
+                    if m:
+                        camp_name = m.group(1)
+                    m2 = re.search(
+                        r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"',
+                        txt,
+                    ) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
+                    if m2:
+                        game_name = m2.group(1)
             except Exception:
                 pass
 
-            await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
+            await queue.put((login, "campaigns", {"campaigns": campaigns_info}))
+            await queue.put(
+                (
+                    login,
+                    "campaign",
+                    {"camp": camp_name or "—", "game": game_name or "—"},
+                )
+            )
+            if campaigns_info:
+                await queue.put(
+                    (login, "channels", {"channels": campaigns_info[0].get("channels", [])})
+                )
             await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-            # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
+            # цикл ожидания команд/останова
+            active_ids = [campaigns_info[0]["id"]] if campaigns_info else []
             while not stop_evt.is_set():
-                await asyncio.sleep(1.0)
+                try:
+                    cmd, arg = await asyncio.wait_for(cmd_q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if cmd == "select_campaigns":
+                    active_ids = [
+                        cid for cid in arg if any(c["id"] == cid for c in campaigns_info)
+                    ]
+                    info = (
+                        next((c for c in campaigns_info if c["id"] == active_ids[0]), None)
+                        if active_ids
+                        else None
+                    )
+                    if info:
+                        await queue.put(
+                            (login, "campaign", {"camp": info["name"], "game": info["game"]})
+                        )
+                        await queue.put(
+                            (login, "channels", {"channels": info.get("channels", [])})
+                        )
 
             await queue.put((login, "status", {"status": "Stopped"}))
 

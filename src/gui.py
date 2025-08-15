@@ -17,6 +17,7 @@ from .onboarding import bulk_onboarding
 from .onboarding_webview import WebOnboarding, Account as WVAccount
 from .miner import run_account  # <- асинхронный воркер (aiohttp)
 from .ops import load_ops, missing_ops
+from .campaign_dialog import CampaignSettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -31,6 +32,9 @@ class MainWindow(QMainWindow):
         # состояния/метрики
         self.tasks: dict[str, asyncio.Task] = {}
         self.stops: dict[str, asyncio.Event] = {}
+        self.cmd_qs: dict[str, asyncio.Queue] = {}
+        self.available_campaigns: dict[str, list] = {}
+        self.selected_campaigns: dict[str, list] = {}
         self.metrics = {"claimed": 0, "errors": 0}
 
         # ── UI ──────────────────────────────────────────────────────────────────
@@ -42,6 +46,7 @@ class MainWindow(QMainWindow):
         self.btn_check = QPushButton("Проверить GQL"); self.btn_check.clicked.connect(self.check_gql); top.addWidget(self.btn_check)
         self.btn_onb = QPushButton("Onboarding (Playwright)"); self.btn_onb.clicked.connect(self.onboarding); top.addWidget(self.btn_onb)
         self.btn_onb2 = QPushButton("Onboarding (WebView)"); self.btn_onb2.clicked.connect(self.onboarding_webview); top.addWidget(self.btn_onb2)
+        self.btn_campaigns = QPushButton("Campaigns…"); self.btn_campaigns.clicked.connect(self.campaign_settings); top.addWidget(self.btn_campaigns)
         self.btn_start = QPushButton("Start All"); self.btn_start.clicked.connect(self.start_all); top.addWidget(self.btn_start)
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
@@ -180,13 +185,34 @@ class MainWindow(QMainWindow):
         dlg.exec()
         self.log_line("Onboarding (WebView) завершён; cookies сохранены.")
 
+    def campaign_settings(self):
+        r = self.tbl.currentRow()
+        if r < 0:
+            return
+        login = self.tbl.item(r, 1).text()
+        campaigns = self.available_campaigns.get(login, [])
+        if not campaigns:
+            self.log_line(f"[{login}] Нет данных о кампаниях")
+            return
+        selected = self.selected_campaigns.get(login, [c.get("id") for c in campaigns])
+        dlg = CampaignSettingsDialog(campaigns, selected, self)
+        if dlg.exec():
+            ids = dlg.selected()
+            self.selected_campaigns[login] = ids
+            q = self.cmd_qs.get(login)
+            if q:
+                self.loop.call_soon_threadsafe(q.put_nowait, ("select_campaigns", ids))
+
     def start_all(self):
         # создаём/пересоздаём задачи в нашем asyncio-цикле
         for a in self.accounts:
-            if a.login in self.tasks: continue
+            if a.login in self.tasks:
+                continue
             stop = asyncio.Event()
             self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
+            cmd_q: asyncio.Queue = asyncio.Queue()
+            self.cmd_qs[a.login] = cmd_q
+            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, cmd_q, stop))
             self.tasks[a.login] = t
             a.status = "Running"
         self.refresh_totals()
@@ -196,6 +222,7 @@ class MainWindow(QMainWindow):
             s.set()
         self.stops.clear()
         self.tasks.clear()
+        self.cmd_qs.clear()
         for a in self.accounts:
             a.status = "Stopped"
         self.refresh_totals()
@@ -215,6 +242,14 @@ class MainWindow(QMainWindow):
             elif kind == "campaign":
                 self.tbl.item(r,3).setText(p.get("camp","") or "—")
                 self.tbl.item(r,4).setText(p.get("game","") or "—")
+            elif kind == "campaigns":
+                self.available_campaigns[login] = p.get("campaigns", [])
+                self.log_line(f"[{login}] Доступно кампаний: {len(self.available_campaigns[login])}")
+                if login not in self.selected_campaigns:
+                    self.selected_campaigns[login] = [c.get("id") for c in self.available_campaigns[login]]
+            elif kind == "channels":
+                chs = p.get("channels", [])
+                self.log_line(f"[{login}] Channels: {', '.join(chs) if chs else '—'}")
             elif kind == "progress":
                 self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
                 self.tbl.item(r,6).setText(str(p.get("remain",0)))
