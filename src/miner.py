@@ -29,7 +29,12 @@ async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
         return None
     return None
 
-async def _gql(session: aiohttp.ClientSession, op_name: str, variables: Dict[str, Any]) -> Any:
+async def _gql(
+    session: aiohttp.ClientSession,
+    op_name: str,
+    variables: Dict[str, Any],
+    proxy: Optional[str] = None,
+) -> Any:
     body = {
         "operationName": op_name,
         "variables": variables,
@@ -37,14 +42,16 @@ async def _gql(session: aiohttp.ClientSession, op_name: str, variables: Dict[str
             "persistedQuery": {"version": 1, "sha256Hash": PQ[op_name]}
         },
     }
-    async with session.post(GQL_URL, json=body) as r:
+    async with session.post(GQL_URL, json=body, proxy=proxy) as r:
         if r.status != 200:
             raise RuntimeError(f"GQL HTTP {r.status}")
         return await r.json()
 
-async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
+async def _discover_campaign(
+    session: aiohttp.ClientSession, proxy: Optional[str]
+) -> Dict[str, Any]:
     # минимальный дашборд дропсов для текущего пользователя
-    return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
+    return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True}, proxy)
 
 async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
     """
@@ -70,7 +77,7 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
     async with aiohttp.ClientSession(headers=headers) as session:
         await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
         try:
-            data = await _discover_campaign(session)
+            data = await _discover_campaign(session, proxy)
 
             # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
             camp_name = ""
