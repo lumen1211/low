@@ -5,16 +5,11 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any
+from datetime import datetime
 
 import aiohttp
 
-GQL_URL = "https://gql.twitch.tv/gql"
-CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
-
-# PersistedQuery хэши (стабильные для веб-клиента Twitch; время от времени меняются, тогда обновим)
-PQ = {
-    "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
-}
+from .twitch_api import TwitchAPI
 
 async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
     fp = cookies_dir / f"{login}.json"
@@ -29,29 +24,12 @@ async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
         return None
     return None
 
-async def _gql(session: aiohttp.ClientSession, op_name: str, variables: Dict[str, Any]) -> Any:
-    body = {
-        "operationName": op_name,
-        "variables": variables,
-        "extensions": {
-            "persistedQuery": {"version": 1, "sha256Hash": PQ[op_name]}
-        },
-    }
-    async with session.post(GQL_URL, json=body) as r:
-        if r.status != 200:
-            raise RuntimeError(f"GQL HTTP {r.status}")
-        return await r.json()
-
-async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
-    # минимальный дашборд дропсов для текущего пользователя
-    return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
-
 async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
     """
-    Шаг 2a: без видео. Только GQL-дискавери кампаний для аккаунта.
+    Основной рабочий цикл аккаунта.
     - читает cookies/<login>.json -> auth-token
-    - вызывает ViewerDropsDashboard PQ
-    - обновляет GUI: Status/Campaign/Game
+    - через TwitchAPI получает кампании, отслеживает прогресс и автоматически клеймит дропы
+    - обновляет GUI: статус, кампания/игра, прогресс
     """
     cookies_dir = Path("cookies")
     token = await _read_auth_token(cookies_dir, login)
@@ -59,61 +37,117 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
         await queue.put((login, "error", {"msg": "no cookies/auth-token"}))
         return
 
-    headers = {
-        "Client-Id": CLIENT_ID,
-        "Authorization": f"OAuth {token}",
-        "Content-Type": "application/json",
-        "Origin": "https://www.twitch.tv",
-        "Referer": "https://www.twitch.tv/",
-    }
+    api = TwitchAPI(token, proxy=proxy or "")
+    await api.start()
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
+    def find_time_based_drop(obj: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(obj, dict):
+            if {"requiredMinutesWatched", "currentMinutesWatched", "dropInstanceID"} <= obj.keys():
+                return obj
+            for v in obj.values():
+                res = find_time_based_drop(v)
+                if res:
+                    return res
+        elif isinstance(obj, list):
+            for v in obj:
+                res = find_time_based_drop(v)
+                if res:
+                    return res
+        return None
+
+    await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
+    try:
+        data = await api.viewer_dashboard()
+
+        camp_name = ""
+        game_name = ""
+        channel_id = ""
         try:
-            data = await _discover_campaign(session)
+            import re, json as _json
+            d = (data or {}).get("data") or {}
+            vd = d.get("viewer") or d.get("currentUser") or {}
+            drops = vd.get("dropsDashboard") or vd.get("drops") or vd
 
-            # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
-            camp_name = ""
-            game_name = ""
-            try:
-                d = (data or {}).get("data") or {}
-                vd = d.get("viewer") or d.get("currentUser") or {}
-                drops = vd.get("dropsDashboard") or vd.get("drops") or vd
+            if isinstance(drops, dict):
+                campaigns = []
+                if isinstance(drops.get("currentCampaigns"), list):
+                    campaigns = drops["currentCampaigns"]
+                elif isinstance(drops.get("availableCampaigns"), list):
+                    campaigns = drops["availableCampaigns"]
+                elif isinstance(drops.get("campaigns"), list):
+                    campaigns = drops["campaigns"]
+                elif isinstance(drops.get("currentDropCampaigns"), list):
+                    campaigns = drops["currentDropCampaigns"]
 
-                if isinstance(drops, dict):
-                    # сначала пробуем текущую/активные кампании
-                    campaigns = []
-                    if isinstance(drops.get("currentCampaigns"), list):
-                        campaigns = drops["currentCampaigns"]
-                    elif isinstance(drops.get("availableCampaigns"), list):
-                        campaigns = drops["availableCampaigns"]
-                    elif isinstance(drops.get("campaigns"), list):
-                        campaigns = drops["campaigns"]
-
-                    if campaigns:
-                        c0 = campaigns[0]
-                        camp_name = c0.get("name") or c0.get("displayName") or c0.get("id","")
-                        game = c0.get("game") or c0.get("gameTitle") or {}
-                        game_name = (game.get("name") or game.get("displayName") or "")
-                # fallback — по тексту
+                if campaigns:
+                    c0 = campaigns[0]
+                    camp_name = c0.get("name") or c0.get("displayName") or c0.get("id", "")
+                    game = c0.get("game") or c0.get("gameTitle") or {}
+                    game_name = game.get("name") or game.get("displayName") or ""
+                    ch = c0.get("broadcaster") or c0.get("channel") or {}
+                    if isinstance(ch, dict):
+                        channel_id = ch.get("id") or ch.get("_id") or ch.get("channelID") or ""
+            if not channel_id or not camp_name:
+                txt = _json.dumps(drops)
+                if not channel_id:
+                    m = re.search(r'"channelID"\s*:\s*"(\d+)"', txt) or re.search(r'"id"\s*:\s*"(\d+)"', txt)
+                    if m:
+                        channel_id = m.group(1)
                 if not camp_name:
-                    import re, json as _json
-                    txt = _json.dumps(drops)
                     m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"name"\s*:\s*"([^"]+)"', txt)
-                    if m: camp_name = m.group(1)
+                    if m:
+                        camp_name = m.group(1)
                     m2 = re.search(r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
-                    if m2: game_name = m2.group(1)
-            except Exception:
-                pass
+                    if m2:
+                        game_name = m2.group(1)
+        except Exception:
+            pass
 
-            await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
-            await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
+        await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
+        await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-            # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
-            while not stop_evt.is_set():
-                await asyncio.sleep(1.0)
+        if not channel_id:
+            raise RuntimeError("active channel not found")
 
-            await queue.put((login, "status", {"status": "Stopped"}))
+        loop = asyncio.get_event_loop()
+        last_inv = last_inc = 0.0
+        while not stop_evt.is_set():
+            now = loop.time()
+            if now - last_inc >= 60:
+                try:
+                    await api.increment(channel_id)
+                except (aiohttp.ClientError, RuntimeError) as e:
+                    await queue.put((login, "error", {"msg": f"increment: {e}"}))
+                    break
+                last_inc = now
+            if now - last_inv >= 150:
+                try:
+                    inv = await api.inventory()
+                except (aiohttp.ClientError, RuntimeError) as e:
+                    await queue.put((login, "error", {"msg": f"inventory: {e}"}))
+                    break
+                drop = find_time_based_drop(inv)
+                if drop:
+                    required = drop.get("requiredMinutesWatched") or 0
+                    current = drop.get("currentMinutesWatched") or 0
+                    drop_id = drop.get("dropInstanceID") or ""
+                    drop_name = drop.get("name") or drop.get("dropName") or drop_id
+                    pct = (current / required * 100) if required else 0
+                    remain = max(0, required - current)
+                    await queue.put((login, "progress", {"pct": pct, "remain": remain}))
+                    if pct >= 100 and drop_id:
+                        try:
+                            await api.claim(drop_id)
+                            ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                            await queue.put((login, "claimed", {"drop": drop_name, "at": ts}))
+                            await queue.put((login, "last_claim_at", {"at": ts}))
+                        except (aiohttp.ClientError, RuntimeError) as e:
+                            await queue.put((login, "error", {"msg": f"claim: {e}"}))
+                last_inv = now
+            await asyncio.sleep(1.0)
 
-        except Exception as e:
-            await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+    except (aiohttp.ClientError, RuntimeError) as e:
+        await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+    finally:
+        await api.close()
+        await queue.put((login, "status", {"status": "Stopped"}))
