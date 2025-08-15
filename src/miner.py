@@ -67,7 +67,7 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
         "Referer": "https://www.twitch.tv/",
     }
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, proxy=proxy) as session:
         await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
         try:
             data = await _discover_campaign(session)
@@ -115,5 +115,7 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
 
             await queue.put((login, "status", {"status": "Stopped"}))
 
+        except aiohttp.ClientProxyConnectionError as e:
+            await queue.put((login, "error", {"msg": f"Proxy error: {e}"}))
         except Exception as e:
             await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
