@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, json
 from pathlib import Path
 
-import requests
+import aiohttp
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
@@ -95,59 +95,92 @@ class MainWindow(QMainWindow):
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
+        # запускаем асинхронную проверку, чтобы не блокировать GUI
+        self.loop.create_task(self._check_gql_async())
+
+    async def _check_gql_async(self):
         ok = exp = miss = other = 0
-        for a in self.accounts:
-            login = a.login
-            r = self.row_of(login)
-            if r < 0: continue
 
-            cookie_file = Path(COOKIES_DIR) / f"{login}.json"
-            if not cookie_file.exists():
-                self.tbl.item(r,2).setText("NO COOKIES")
-                self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
-                miss += 1; continue
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
+            async def _check_one(a: Account) -> str:
+                login = a.login
+                r = self.row_of(login)
+                if r < 0:
+                    return "other"
 
-            token = ""
-            try:
-                data = json.loads(cookie_file.read_text(encoding="utf-8"))
-                for c in data:
-                    if c.get("name") == "auth-token":
-                        token = c.get("value") or ""
-                        break
-            except Exception as e:
-                self.tbl.item(r,2).setText("BAD COOKIES")
-                self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1; continue
+                cookie_file = Path(COOKIES_DIR) / f"{login}.json"
+                if not cookie_file.exists():
+                    await self.queue.put((login, "status", {
+                        "status": "NO COOKIES",
+                        "note": f"{cookie_file} not found",
+                    }))
+                    return "miss"
 
-            if not token:
-                self.tbl.item(r,2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1; continue
+                token = ""
+                try:
+                    data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                    for c in data:
+                        if c.get("name") == "auth-token":
+                            token = c.get("value") or ""
+                            break
+                except Exception as e:
+                    await self.queue.put((login, "status", {
+                        "status": "BAD COOKIES",
+                        "note": str(e),
+                    }))
+                    return "other"
 
-            try:
-                resp = requests.get(
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {token}"},
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    self.tbl.item(r,2).setText("OK")
-                    j = resp.json()
-                    login_resp = j.get("login","?")
-                    scopes = ",".join(j.get("scopes",[]))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
-                    ok += 1
-                elif resp.status_code in (401, 403):
-                    self.tbl.item(r,2).setText("EXPIRED")
-                    self.log_line(f"[{login}] EXPIRED — token invalid")
-                    exp += 1
-                else:
-                    self.tbl.item(r,2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
-                    other += 1
-            except Exception as e:
-                self.tbl.item(r,2).setText("ERROR")
-                self.log_line(f"[{login}] ERROR — {e}")
+                if not token:
+                    await self.queue.put((login, "status", {
+                        "status": "NO TOKEN",
+                        "note": "NO TOKEN in cookies",
+                    }))
+                    return "miss"
+
+                try:
+                    async with session.get(
+                        "https://id.twitch.tv/oauth2/validate",
+                        headers={"Authorization": f"OAuth {token}"},
+                    ) as resp:
+                        if resp.status == 200:
+                            j = await resp.json()
+                            login_resp = j.get("login", "?")
+                            scopes = ",".join(j.get("scopes", []))
+                            await self.queue.put((login, "status", {
+                                "status": "OK",
+                                "note": f"login={login_resp} scopes=[{scopes}]",
+                            }))
+                            return "ok"
+                        elif resp.status in (401, 403):
+                            await self.queue.put((login, "status", {
+                                "status": "EXPIRED",
+                                "note": "token invalid",
+                            }))
+                            return "exp"
+                        else:
+                            text = (await resp.text())[:120]
+                            await self.queue.put((login, "status", {
+                                "status": f"HTTP {resp.status}",
+                                "note": text,
+                            }))
+                            return "other"
+                except Exception as e:
+                    await self.queue.put((login, "status", {
+                        "status": "ERROR",
+                        "note": str(e),
+                    }))
+                    return "other"
+
+            results = await asyncio.gather(*(_check_one(a) for a in self.accounts))
+
+        for res in results:
+            if res == "ok":
+                ok += 1
+            elif res == "exp":
+                exp += 1
+            elif res == "miss":
+                miss += 1
+            else:
                 other += 1
 
         self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
