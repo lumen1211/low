@@ -2,61 +2,114 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main ]     # проверяем каждый PR в main
+    branches: [ main ]
   push:
-    branches: [ main ]     # и каждый пуш в main
-  workflow_dispatch: {}     # возможность запустить вручную из вкладки Actions
+    branches: [ main ]
+  workflow_dispatch: {}
 
 jobs:
-  tests:
-    name: Pytests (Ubuntu, Py3.11)
+  check:
+    name: Build & Run (auto-detect tests + cli/gui)
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read        # минимально нужные права
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          # если есть requirements.txt — ставим зависимости проекта
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # если используете pyproject.toml с extras [dev] — попробуем их поставить
-          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || true; fi
-          # ОБЯЗАТЕЛЬНО ставим pytest (раньше из-за его отсутствия всё падало)
-          pip install pytest
-
-      - name: Run unit tests
-        run: |
-          pytest -q --maxfail=1 --disable-warnings
-
-  run_app:
-    name: Run app (headless) + capture logs/screenshot
-    runs-on: ubuntu-latest
-    needs: tests
-    if: ${{ always() }}    # запустить даже если tests упали — чтобы увидеть, что происходит
 
     permissions:
       contents: read
 
+    env:
+      # Можно переопределить входную точку и аргументы как переменные окружения,
+      # если авто-детект ниже не угадал:
+      # APP_ENTRY: "src/miner.py"
+      # APP_ARGS: "--help"
+      PYTHON_VER: "3.11"
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VER }}
           cache: pip
 
-      - name: Install system packages for headless GUI
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # не падаем, если pyproject.toml без [project.optional-dependencies]
+          if [ -f pyproject.toml ]; then pip install -e . || true; fi
+
+      # --- ТЕСТЫ (опционально) ------------------------------------------------
+      - name: Detect tests
+        id: detect_tests
+        shell: bash
+        run: |
+          set -e
+          # ищем файлы вида test_*.py или *_test.py в папке tests/ или по проекту
+          if ls tests/test_*.py tests/*_test.py **/test_*.py **/*_test.py 1>/dev/null 2>&1; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pytest (only if tests exist)
+        if: steps.detect_tests.outputs.has_tests == 'true'
+        run: |
+          pip install pytest
+
+      - name: Run pytest
+        if: steps.detect_tests.outputs.has_tests == 'true'
+        run: |
+          pytest -q --maxfail=1 --disable-warnings
+
+      # --- ОПРЕДЕЛЯЕМ ТИП ПРИЛОЖЕНИЯ (CLI/GUI) --------------------------------
+      - name: Detect app mode and entrypoint
+        id: detect_app
+        shell: bash
+        run: |
+          set -e
+          # если APP_ENTRY задан в env — используем его; иначе авто-детект
+          if [ -n "${APP_ENTRY:-}" ]; then
+            entry="${APP_ENTRY}"
+          elif [ -f src/gui.py ]; then
+            entry="src/gui.py"
+          elif [ -f src/miner.py ]; then
+            entry="src/miner.py"
+          elif [ -f main.py ]; then
+            entry="main.py"
+          else
+            # берём любой .py в src как последний шанс
+            entry="$(ls -1 src/*.py 2>/dev/null | head -n1 || true)"
+          fi
+          echo "entry=$entry" >> "$GITHUB_OUTPUT"
+          if [ -z "$entry" ]; then
+            echo "::warning::Не удалось определить точку входа. Пропустим запуск приложения."
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # GUI считаем, если файл называется gui.py (можно расширить логику)
+          if [[ "$entry" == *"gui.py" ]]; then
+            echo "mode=gui" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=cli" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Detected entry: $entry"
+
+      # --- ЗАПУСК CLI ---------------------------------------------------------
+      - name: Run CLI app and capture log
+        if: steps.detect_app.outputs.mode == 'cli'
+        shell: bash
+        env:
+          ENTRY: ${{ steps.detect_app.outputs.entry }}
+          APP_ARGS: ${{ env.APP_ARGS }}
+        run: |
+          set -e
+          echo "[CI] running CLI: ${ENTRY} ${APP_ARGS:-}"
+          python "${ENTRY}" ${APP_ARGS:-} > run.log 2>&1 || true
+
+      # --- ЗАПУСК GUI (headless) + СКРИН --------------------------------------
+      - name: Install system packages for GUI (xvfb + libs)
+        if: steps.detect_app.outputs.mode == 'gui'
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb imagemagick \
@@ -64,46 +117,45 @@ jobs:
             libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 libxcb-image0 \
             fonts-dejavu
 
-      - name: Install Python deps for app
+      - name: Ensure Qt/PySide/PyQt (best effort)
+        if: steps.detect_app.outputs.mode == 'gui'
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # на случай, если GUI на PySide6 или PyQt5 — ставим то, что найдётся
-          pip install PySide6 || pip install PyQt5 || true
+          pip install -q PySide6 || pip install -q PyQt5 || true
 
-      # Если у вас не GUI, а консольное приложение — замените команду запуска ниже.
-      - name: Run app under Xvfb and take screenshot
+      - name: Run GUI under Xvfb and take screenshot
+        if: steps.detect_app.outputs.mode == 'gui'
         shell: bash
         env:
           DISPLAY: ":99"
-          APP_ENTRY: "src/gui.py"     # ← ПРИ НУЖДЕ ИЗМЕНИТЕ на вашу точку входа, например src/miner.py
+          ENTRY: ${{ steps.detect_app.outputs.entry }}
+          APP_ARGS: ${{ env.APP_ARGS }}
         run: |
           set -e
           Xvfb :99 -screen 0 1920x1080x24 &
           XVFB_PID=$!
           sleep 1
 
-          echo "[CI] launching app: ${APP_ENTRY}"
-          (python "${APP_ENTRY}" > run.log 2>&1 &) || true
+          echo "[CI] launching GUI: ${ENTRY} ${APP_ARGS:-}"
+          (python "${ENTRY}" ${APP_ARGS:-} > run.log 2>&1 &) || true
           APP_PID=$!
 
-          # даём приложению шанс запуститься/что-то вывести
+          # ждём, даём шанс окну отрисоваться
           sleep 8
-
-          # делаем скрин «экрана» (если GUI действительно рисует окно)
           import -window root screenshot.png || true
 
-          # завершаем приложение
+          # закрываем приложение
           kill ${APP_PID} 2>/dev/null || true
           sleep 1
           kill -9 ${APP_PID} 2>/dev/null || true
           kill ${XVFB_PID} 2>/dev/null || true
 
-      - name: Upload artifacts (logs + screenshot)
+      # --- АРТЕФАКТЫ ----------------------------------------------------------
+      - name: Upload artifacts (logs + screenshot if any)
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: app-run
+          name: run-output
           path: |
             run.log
             screenshot.png
+          if-no-files-found: ignore
