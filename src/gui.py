@@ -218,7 +218,10 @@ class MainWindow(QMainWindow):
             elif kind == "progress":
                 self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
                 self.tbl.item(r,6).setText(str(p.get("remain",0)))
-            elif kind == "claimed":
+                self.log_line(
+                    f"[{login}] Progress {p.get('drop','')}: {p.get('pct',0):.0f}% (remain {p.get('remain',0)}m)"
+                )
+            elif kind == "claim":
                 self.metrics["claimed"] += 1
                 self.tbl.item(r,7).setText(p.get("at",""))
                 self.log_line(f"[{login}] Claimed {p.get('drop','')}")
