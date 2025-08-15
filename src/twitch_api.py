@@ -28,6 +28,7 @@ class TwitchAPI:
             raise RuntimeError(f"Persisted hash for {operation} not set in ops/ops.json")
         payload = {"operationName": operation, "variables": variables, "extensions": {"persistedQuery": {"version": 1, "sha256Hash": h}}}
         attempt = 0
+        max_attempts = 5
         while True:
             try:
                 async with self.session.post(GQL, json=payload, proxy=self.proxy, headers={
@@ -36,18 +37,25 @@ class TwitchAPI:
                     "Content-Type": "application/json",
                 }) as r:
                     if r.status == 429:
-                        await asyncio.sleep(min(60, 2**attempt)); attempt += 1; continue
+                        attempt += 1
+                        if attempt > max_attempts:
+                            raise RuntimeError("Too many retries for GQL request")
+                        await asyncio.sleep(min(60, 2**attempt))
+                        continue
                     if 200 <= r.status < 300:
                         data = await r.json()
-                        if isinstance(data, list): data = data[0]
+                        if isinstance(data, list):
+                            data = data[0]
                         if isinstance(data, dict) and data.get("errors"):
                             raise RuntimeError(str(data["errors"]))
                         return data
                     text = await r.text()
                     raise RuntimeError(f"GQL {r.status}: {text}")
             except aiohttp.ClientError:
-                await asyncio.sleep(min(60, 2**attempt)); attempt += 1
-                if attempt > 5: raise
+                attempt += 1
+                if attempt > max_attempts:
+                    raise RuntimeError("Too many retries for GQL request")
+                await asyncio.sleep(min(60, 2**attempt))
 
     async def viewer_dashboard(self) -> Any: return await self.gql("ViewerDropsDashboard", {})
     async def inventory(self) -> Any: return await self.gql("Inventory", {})
