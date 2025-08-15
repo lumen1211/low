@@ -46,7 +46,7 @@ async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
     # минимальный дашборд дропсов для текущего пользователя
     return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
 
-async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
+async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event, cmd_q: Optional[asyncio.Queue] = None):
     """
     Шаг 2a: без видео. Только GQL-дискавери кампаний для аккаунта.
     - читает cookies/<login>.json -> auth-token
@@ -75,6 +75,7 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
             # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
             camp_name = ""
             game_name = ""
+            campaigns = []
             try:
                 d = (data or {}).get("data") or {}
                 vd = d.get("viewer") or d.get("currentUser") or {}
@@ -82,7 +83,6 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
 
                 if isinstance(drops, dict):
                     # сначала пробуем текущую/активные кампании
-                    campaigns = []
                     if isinstance(drops.get("currentCampaigns"), list):
                         campaigns = drops["currentCampaigns"]
                     elif isinstance(drops.get("availableCampaigns"), list):
@@ -106,11 +106,40 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
             except Exception:
                 pass
 
+            streams = []
+            try:
+                if campaigns:
+                    c0 = campaigns[0]
+                    raw_streams = (
+                        c0.get("streams")
+                        or c0.get("activeChannels")
+                        or c0.get("activeStreamInfo")
+                        or []
+                    )
+                    if isinstance(raw_streams, list):
+                        for s in raw_streams:
+                            nm = s.get("name") or s.get("displayName") or s.get("login") or ""
+                            vc = s.get("viewersCount") or s.get("viewerCount") or s.get("viewCount") or 0
+                            streams.append({"name": nm, "viewers": vc})
+            except Exception:
+                pass
+
             await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
+            await queue.put((login, "channels", {"channels": streams}))
             await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-            # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
+            current = streams[0]["name"] if streams else ""
+            # Пока просто ждём Stop, обрабатывая команды ручного переключения
             while not stop_evt.is_set():
+                if cmd_q is not None:
+                    try:
+                        cmd, val = cmd_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    else:
+                        if cmd == "switch" and val:
+                            current = val
+                            await queue.put((login, "switch", {"channel": current}))
                 await asyncio.sleep(1.0)
 
             await queue.put((login, "status", {"status": "Stopped"}))
