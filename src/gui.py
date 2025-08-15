@@ -164,7 +164,7 @@ class MainWindow(QMainWindow):
             self._remove_account_from_ui(login)
 
     def onboarding(self):
-        rows = [(a.login, a.password or "", a.totp_secret or "") for a in self.accounts]
+        rows = [(a.login, a.password or "", a.totp_secret or "", a.proxy or "") for a in self.accounts]
         self.log_line(f"Onboarding: запускаю, всего аккаунтов: {len(rows)}")
         bulk_onboarding(
             rows,
@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
         )
 
     def onboarding_webview(self):
-        accs = [WVAccount(label=a.label, login=a.login, password=a.password or "") for a in self.accounts]
+        accs = [WVAccount(label=a.label, login=a.login, password=a.password or "", proxy=a.proxy or "") for a in self.accounts]
         dlg = WebOnboarding(cookies_dir=Path("cookies"), accounts=accs, per_acc_timeout_sec=120, parent=self)
         dlg.exec()
         self.log_line("Onboarding (WebView) завершён; cookies сохранены.")
@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
             if a.login in self.tasks: continue
             stop = asyncio.Event()
             self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
+            t = self.loop.create_task(run_account(a.login, a.proxy or None, self.queue, stop))
             self.tasks[a.login] = t
             a.status = "Running"
         self.refresh_totals()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json, time, os, re
 from typing import Iterable, Tuple, List, Dict, Optional, Callable
+from urllib.parse import urlparse
 
 import pyotp
 from playwright.sync_api import sync_playwright, Page, Locator
@@ -11,7 +12,7 @@ LOGIN_URL = "https://www.twitch.tv/login?no-reload=true"
 
 # ───────── helpers ─────────
 
-def _launch_browser(p):
+def _launch_browser(p, proxy: str = ""):
     args = [
         "--disable-blink-features=AutomationControlled",
         "--disable-extensions",
@@ -22,15 +23,26 @@ def _launch_browser(p):
     if os.environ.get("TW_ONB_DISABLE_GPU", "0") == "1":
         args += ["--disable-gpu", "--disable-software-rasterizer"]
 
+    proxy_opt = None
+    if proxy:
+        u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+        server = f"{u.scheme or 'http'}://{u.hostname}:{u.port}" if u.hostname and u.port else None
+        if server:
+            proxy_opt = {"server": server}
+            if u.username:
+                proxy_opt["username"] = u.username
+            if u.password:
+                proxy_opt["password"] = u.password
+
     for channel in ("chrome", "msedge", None):
         try:
             if channel:
-                return p.chromium.launch(channel=channel, headless=False, args=args)
+                return p.chromium.launch(channel=channel, headless=False, args=args, proxy=proxy_opt)
             else:
-                return p.chromium.launch(headless=False, args=args)
+                return p.chromium.launch(headless=False, args=args, proxy=proxy_opt)
         except Exception:
             continue
-    return p.chromium.launch(headless=False)
+    return p.chromium.launch(headless=False, proxy=proxy_opt)
 
 def _cookies_map(context) -> Dict[str, str]:
     try:
@@ -200,12 +212,12 @@ def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
 
 # ───────── public API ─────────
 
-def login_and_save_cookies(login: str, password: str, out_path: Path, totp_secret: str = "", timeout_s: int = 180) -> dict:
-    res = bulk_onboarding([(login, password, totp_secret)], out_dir=out_path.parent, timeout_s=timeout_s)
+def login_and_save_cookies(login: str, password: str, out_path: Path, totp_secret: str = "", proxy: str = "", timeout_s: int = 180) -> dict:
+    res = bulk_onboarding([(login, password, totp_secret, proxy)], out_dir=out_path.parent, timeout_s=timeout_s)
     return res[0] if res else {"result": "FAILED", "note": "unknown error"}
 
 def bulk_onboarding(
-    accounts: Iterable[Tuple[str, str, str]],
+    accounts: Iterable[Tuple[str, str, str, str]],
     out_dir: Path,
     timeout_s: int = 180,
     progress_cb: Optional[Callable[[Dict[str, str]], None]] = None,
@@ -221,15 +233,34 @@ def bulk_onboarding(
     results: List[Dict[str, str]] = []
 
     with sync_playwright() as p:
-        browser = _launch_browser(p)
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = context.new_page(); page.bring_to_front()
+        browser = context = page = None
+        current_proxy = None
 
-        for login, password, totp in accounts:
+        for item in accounts:
+            login, password, totp = item[0], item[1], item[2]
+            proxy = item[3] if len(item) >= 4 else ""
+
+            if proxy != current_proxy:
+                # Перезапускаем браузер при смене прокси
+                try:
+                    context and context.close()
+                except Exception:
+                    pass
+                try:
+                    browser and browser.close()
+                except Exception:
+                    pass
+                browser = _launch_browser(p, proxy)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                page = context.new_page(); page.bring_to_front()
+                current_proxy = proxy
+            else:
+                try:
+                    context.clear_cookies()
+                except Exception:
+                    pass
+
             progress_cb and progress_cb({"login": login, "result": "STEP", "note": "Открываю форму логина"})
-            try: context.clear_cookies()
-            except Exception: pass
-
             _goto(page, LOGIN_URL)
             _dismiss_consent(page)
 
@@ -287,9 +318,13 @@ def bulk_onboarding(
                 res = {"login": login, "result": "FAILED", "note": last_err or "Пер-аккаунт таймаут"}
                 results.append(res); progress_cb and progress_cb(res)
 
-        try: context.close()
-        except Exception: pass
-        try: browser.close()
-        except Exception: pass
+        try:
+            context and context.close()
+        except Exception:
+            pass
+        try:
+            browser and browser.close()
+        except Exception:
+            pass
 
     return results

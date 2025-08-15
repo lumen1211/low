@@ -15,7 +15,8 @@ class TwitchAPI:
 
     async def start(self):
         if not self.session or self.session.closed:
-            self.session = aiohttp.ClientSession(headers={"User-Agent": self.ua})
+            connector = aiohttp.ProxyConnector.from_url(self.proxy) if self.proxy else None
+            self.session = aiohttp.ClientSession(headers={"User-Agent": self.ua}, connector=connector)
 
     async def close(self):
         if self.session and not self.session.closed:
