@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import sys, argparse, csv, asyncio
+import sys, argparse, csv
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from .gui import MainWindow
@@ -32,11 +32,6 @@ def main():
     app = QApplication(sys.argv)
     win = MainWindow(Path(args.accounts))
     win.show()
-
-    # asyncio + Qt pump
-    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-    from PySide6.QtCore import QTimer
-    t = QTimer(); t.timeout.connect(lambda: None); t.start(50)
     sys.exit(app.exec())
 
 if __name__ == "__main__":
