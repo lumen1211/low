@@ -6,9 +6,11 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
+    QTableView, QHeaderView, QTextEdit, QLineEdit
 )
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import (
+    QTimer, QAbstractTableModel, Qt, QModelIndex, QSortFilterProxyModel
+)
 
 # локальные модули
 from .types import Account
@@ -17,6 +19,86 @@ from .onboarding import bulk_onboarding
 from .onboarding_webview import WebOnboarding, Account as WVAccount
 from .miner import run_account  # <- асинхронный воркер (aiohttp)
 from .ops import load_ops, missing_ops
+
+
+class AccountsTableModel(QAbstractTableModel):
+    headers = [
+        "Label",
+        "Login",
+        "Status",
+        "Campaign",
+        "Game",
+        "Progress",
+        "Remain (min)",
+        "Last claim",
+    ]
+
+    def __init__(self, accounts: list[Account]):
+        super().__init__()
+        self.accounts = accounts
+
+    # базовая структура модели -------------------------------------------------
+    def rowCount(self, parent: QModelIndex | None = None):  # type: ignore[override]
+        return len(self.accounts)
+
+    def columnCount(self, parent: QModelIndex | None = None):  # type: ignore[override]
+        return len(self.headers)
+
+    def data(self, index: QModelIndex, role=Qt.DisplayRole):  # type: ignore[override]
+        if not index.isValid():
+            return None
+        acc = self.accounts[index.row()]
+        col = index.column()
+
+        if role == Qt.DisplayRole:
+            return [
+                acc.label,
+                acc.login,
+                acc.status,
+                acc.active_campaign,
+                acc.game,
+                f"{acc.progress_pct:.0f}%",
+                str(acc.remaining_minutes),
+                acc.last_claim_at or "",
+            ][col]
+        if role == Qt.UserRole:
+            return [
+                acc.label,
+                acc.login,
+                acc.status,
+                acc.active_campaign,
+                acc.game,
+                acc.progress_pct,
+                acc.remaining_minutes,
+                acc.last_claim_at or "",
+            ][col]
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role=Qt.DisplayRole):  # type: ignore[override]
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self.headers[section]
+        return super().headerData(section, orientation, role)
+
+
+class AccountsFilterModel(QSortFilterProxyModel):
+    def __init__(self):
+        super().__init__()
+        self._text = ""
+
+    def setFilterText(self, text: str):
+        self._text = text.lower()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex):  # type: ignore[override]
+        if not self._text:
+            return True
+        model = self.sourceModel()
+        label = model.index(source_row, 0, source_parent).data(Qt.DisplayRole)
+        login = model.index(source_row, 1, source_parent).data(Qt.DisplayRole)
+        return (
+            self._text in str(label).lower() or
+            self._text in str(login).lower()
+        )
 
 
 class MainWindow(QMainWindow):
@@ -46,14 +128,22 @@ class MainWindow(QMainWindow):
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
 
-        self.tbl = QTableWidget(0, 8)
-        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Progress","Remain (min)","Last claim"])
+        self.search = QLineEdit(); self.search.setPlaceholderText("Поиск по логину/метке")
+        v.addWidget(self.search)
+
+        self.model = AccountsTableModel(self.accounts)
+        self.proxy = AccountsFilterModel()
+        self.proxy.setSourceModel(self.model)
+        self.proxy.setSortRole(Qt.UserRole)
+        self.tbl = QTableView(); self.tbl.setModel(self.proxy)
+        self.tbl.setSortingEnabled(True)
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.search.textChanged.connect(self.proxy.setFilterText)
         v.addWidget(self.tbl)
 
         self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
 
-        self.populate(); self.refresh_totals()
+        self.refresh_totals()
 
         # ── встроенный asyncio-loop ─────────────────────────────────────────────
         # ВАЖНО: loop живёт в главном потоке; QTimer "тикает" его, чтобы шли задачи.
@@ -68,16 +158,10 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.pump); self.timer.start()
 
     # ── helpers ────────────────────────────────────────────────────────────────
-    def populate(self):
-        self.tbl.setRowCount(0)
-        for a in self.accounts:
-            r = self.tbl.rowCount(); self.tbl.insertRow(r)
-            for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
-                self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
-
     def row_of(self, login: str) -> int:
-        for r in range(self.tbl.rowCount()):
-            if self.tbl.item(r,1).text() == login: return r
+        for i, a in enumerate(self.accounts):
+            if a.login == login:
+                return i
         return -1
 
     def log_line(self, s: str): self.log.append(s)
@@ -88,24 +172,26 @@ class MainWindow(QMainWindow):
 
     def _remove_account_from_ui(self, login: str):
         r = self.row_of(login)
-        if r >= 0: self.tbl.removeRow(r)
-        self.accounts = [a for a in self.accounts if a.login != login]
+        if r >= 0:
+            self.model.beginRemoveRows(QModelIndex(), r, r)
+            self.accounts.pop(r)
+            self.model.endRemoveRows()
         self.refresh_totals()
 
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
         ok = exp = miss = other = 0
-        for a in self.accounts:
+        for i, a in enumerate(self.accounts):
             login = a.login
-            r = self.row_of(login)
-            if r < 0: continue
 
             cookie_file = Path(COOKIES_DIR) / f"{login}.json"
             if not cookie_file.exists():
-                self.tbl.item(r,2).setText("NO COOKIES")
+                a.status = "NO COOKIES"
+                self.model.dataChanged.emit(self.model.index(i,2), self.model.index(i,2))
                 self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
-                miss += 1; continue
+                miss += 1
+                continue
 
             token = ""
             try:
@@ -115,14 +201,18 @@ class MainWindow(QMainWindow):
                         token = c.get("value") or ""
                         break
             except Exception as e:
-                self.tbl.item(r,2).setText("BAD COOKIES")
+                a.status = "BAD COOKIES"
+                self.model.dataChanged.emit(self.model.index(i,2), self.model.index(i,2))
                 self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1; continue
+                other += 1
+                continue
 
             if not token:
-                self.tbl.item(r,2).setText("NO TOKEN")
+                a.status = "NO TOKEN"
+                self.model.dataChanged.emit(self.model.index(i,2), self.model.index(i,2))
                 self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1; continue
+                miss += 1
+                continue
 
             try:
                 resp = requests.get(
@@ -131,24 +221,26 @@ class MainWindow(QMainWindow):
                     timeout=6,
                 )
                 if resp.status_code == 200:
-                    self.tbl.item(r,2).setText("OK")
+                    a.status = "OK"
                     j = resp.json()
                     login_resp = j.get("login","?")
                     scopes = ",".join(j.get("scopes",[]))
                     self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
                     ok += 1
                 elif resp.status_code in (401, 403):
-                    self.tbl.item(r,2).setText("EXPIRED")
+                    a.status = "EXPIRED"
                     self.log_line(f"[{login}] EXPIRED — token invalid")
                     exp += 1
                 else:
-                    self.tbl.item(r,2).setText(f"HTTP {resp.status_code}")
+                    a.status = f"HTTP {resp.status_code}"
                     self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
                     other += 1
             except Exception as e:
-                self.tbl.item(r,2).setText("ERROR")
+                a.status = "ERROR"
                 self.log_line(f"[{login}] ERROR — {e}")
                 other += 1
+
+            self.model.dataChanged.emit(self.model.index(i,2), self.model.index(i,2))
 
         self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
 
@@ -182,13 +274,15 @@ class MainWindow(QMainWindow):
 
     def start_all(self):
         # создаём/пересоздаём задачи в нашем asyncio-цикле
-        for a in self.accounts:
-            if a.login in self.tasks: continue
+        for i, a in enumerate(self.accounts):
+            if a.login in self.tasks:
+                continue
             stop = asyncio.Event()
             self.stops[a.login] = stop
             t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
             self.tasks[a.login] = t
             a.status = "Running"
+            self.model.dataChanged.emit(self.model.index(i,2), self.model.index(i,2))
         self.refresh_totals()
 
     def stop_all(self):
@@ -196,8 +290,9 @@ class MainWindow(QMainWindow):
             s.set()
         self.stops.clear()
         self.tasks.clear()
-        for a in self.accounts:
+        for i, a in enumerate(self.accounts):
             a.status = "Stopped"
+            self.model.dataChanged.emit(self.model.index(i,2), self.model.index(i,2))
         self.refresh_totals()
 
     # ── корутина-приёмник сообщений от miner.py ───────────────────────────────
@@ -207,20 +302,25 @@ class MainWindow(QMainWindow):
             r = self.row_of(login)
             if r < 0:
                 continue
+            acc = self.accounts[r]
             if kind == "status":
-                self.tbl.item(r,2).setText(p.get("status",""))
+                acc.status = p.get("status", "")
                 note = p.get("note")
                 if note:
                     self.log_line(f"[{login}] {note}")
+                self.model.dataChanged.emit(self.model.index(r,2), self.model.index(r,2))
             elif kind == "campaign":
-                self.tbl.item(r,3).setText(p.get("camp","") or "—")
-                self.tbl.item(r,4).setText(p.get("game","") or "—")
+                acc.active_campaign = p.get("camp", "") or "—"
+                acc.game = p.get("game", "") or "—"
+                self.model.dataChanged.emit(self.model.index(r,3), self.model.index(r,4))
             elif kind == "progress":
-                self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
-                self.tbl.item(r,6).setText(str(p.get("remain",0)))
+                acc.progress_pct = p.get("pct", 0)
+                acc.remaining_minutes = p.get("remain", 0)
+                self.model.dataChanged.emit(self.model.index(r,5), self.model.index(r,6))
             elif kind == "claimed":
                 self.metrics["claimed"] += 1
-                self.tbl.item(r,7).setText(p.get("at",""))
+                acc.last_claim_at = p.get("at", "")
+                self.model.dataChanged.emit(self.model.index(r,7), self.model.index(r,7))
                 self.log_line(f"[{login}] Claimed {p.get('drop','')}")
             elif kind == "error":
                 self.metrics["errors"] += 1
