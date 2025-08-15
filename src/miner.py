@@ -109,6 +109,9 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
             await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
             await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
+            # начальный прогресс: нет активного дропа, прогресс 0%
+            await queue.put((login, "progress", {"drop": "—", "pct": 0.0, "next": 0}))
+
             # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
             while not stop_evt.is_set():
                 await asyncio.sleep(1.0)

@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QProgressBar
 )
 from PySide6.QtCore import QTimer
 
@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         v.addLayout(top)
 
         self.tbl = QTableWidget(0, 8)
-        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Progress","Remain (min)","Last claim"])
+        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Progress","Next drop in","Last claim"])
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         v.addWidget(self.tbl)
 
@@ -72,8 +72,22 @@ class MainWindow(QMainWindow):
         self.tbl.setRowCount(0)
         for a in self.accounts:
             r = self.tbl.rowCount(); self.tbl.insertRow(r)
-            for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
-                self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
+            self.tbl.setItem(r,0,QTableWidgetItem(a.label))
+            self.tbl.setItem(r,1,QTableWidgetItem(a.login))
+            self.tbl.setItem(r,2,QTableWidgetItem(a.status))
+            self.tbl.setItem(r,3,QTableWidgetItem(""))
+            self.tbl.setItem(r,4,QTableWidgetItem(""))
+            pb = QProgressBar(); pb.setRange(0,100); pb.setValue(0); pb.setFormat("— %p%")
+            self.tbl.setCellWidget(r,5,pb)
+            self.tbl.setItem(r,6,QTableWidgetItem("00:00"))
+            self.tbl.setItem(r,7,QTableWidgetItem(""))
+
+    def _fmt_seconds(self, secs: int) -> str:
+        m, s = divmod(int(secs), 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
 
     def row_of(self, login: str) -> int:
         for r in range(self.tbl.rowCount()):
@@ -216,10 +230,26 @@ class MainWindow(QMainWindow):
                 self.tbl.item(r,3).setText(p.get("camp","") or "—")
                 self.tbl.item(r,4).setText(p.get("game","") or "—")
             elif kind == "progress":
-                self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
-                self.tbl.item(r,6).setText(str(p.get("remain",0)))
+                pb = self.tbl.cellWidget(r,5)
+                if isinstance(pb, QProgressBar):
+                    pb.setValue(int(p.get("pct",0)))
+                    drop = p.get("drop")
+                    if drop:
+                        pb.setFormat(f"{drop} %p%")
+                    else:
+                        pb.setFormat("%p%")
+                self.tbl.item(r,6).setText(self._fmt_seconds(p.get("next",0)))
             elif kind == "claimed":
                 self.metrics["claimed"] += 1
+                pb = self.tbl.cellWidget(r,5)
+                if isinstance(pb, QProgressBar):
+                    pb.setValue(int(p.get("pct",0)))
+                    drop = p.get("drop")
+                    if drop:
+                        pb.setFormat(f"{drop} %p%")
+                    else:
+                        pb.setFormat("%p%")
+                self.tbl.item(r,6).setText(self._fmt_seconds(p.get("next",0)))
                 self.tbl.item(r,7).setText(p.get("at",""))
                 self.log_line(f"[{login}] Claimed {p.get('drop','')}")
             elif kind == "error":
