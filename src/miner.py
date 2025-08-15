@@ -16,7 +16,7 @@ PQ = {
     "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
 }
 
-async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
+def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
     fp = cookies_dir / f"{login}.json"
     if not fp.exists():
         return None
@@ -54,7 +54,7 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
     - обновляет GUI: Status/Campaign/Game
     """
     cookies_dir = Path("cookies")
-    token = await _read_auth_token(cookies_dir, login)
+    token = await asyncio.to_thread(_read_auth_token, cookies_dir, login)
     if not token:
         await queue.put((login, "error", {"msg": "no cookies/auth-token"}))
         return
