@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QInputDialog
 )
 from PySide6.QtCore import QTimer
 
@@ -15,7 +15,7 @@ from .types import Account
 from .accounts import load_accounts, COOKIES_DIR
 from .onboarding import bulk_onboarding
 from .onboarding_webview import WebOnboarding, Account as WVAccount
-from .miner import run_account  # <- асинхронный воркер (aiohttp)
+from .miner import run_account, get_active_campaigns  # <- асинхронный воркер (aiohttp)
 from .ops import load_ops, missing_ops
 
 
@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
         self.btn_onb2 = QPushButton("Onboarding (WebView)"); self.btn_onb2.clicked.connect(self.onboarding_webview); top.addWidget(self.btn_onb2)
         self.btn_start = QPushButton("Start All"); self.btn_start.clicked.connect(self.start_all); top.addWidget(self.btn_start)
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
+        self.btn_campaign = QPushButton("Campaign"); self.btn_campaign.clicked.connect(self.select_campaign); top.addWidget(self.btn_campaign)
         v.addLayout(top)
 
         self.tbl = QTableWidget(0, 8)
@@ -72,7 +73,7 @@ class MainWindow(QMainWindow):
         self.tbl.setRowCount(0)
         for a in self.accounts:
             r = self.tbl.rowCount(); self.tbl.insertRow(r)
-            for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
+            for i, val in enumerate([a.label, a.login, a.status, a.active_campaign or "", "", "0%", "0", ""]):
                 self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
 
     def row_of(self, login: str) -> int:
@@ -91,6 +92,37 @@ class MainWindow(QMainWindow):
         if r >= 0: self.tbl.removeRow(r)
         self.accounts = [a for a in self.accounts if a.login != login]
         self.refresh_totals()
+
+    def select_campaign(self):
+        r = self.tbl.currentRow()
+        if r < 0:
+            self.log_line("Не выбран аккаунт для выбора кампании")
+            return
+        login = self.tbl.item(r,1).text()
+        account = next((a for a in self.accounts if a.login == login), None)
+        if not account:
+            return
+
+        async def _choose():
+            camps = await get_active_campaigns(login, account.proxy or None)
+            items = [c.get("name", "") for c in camps if c.get("name")]
+            items.sort()
+            items = ["<none>"] + items
+            camp, ok = QInputDialog.getItem(self, "Выбор кампании", "Campaign:", items, 0, False)
+            if not ok:
+                return
+            if camp == "<none>":
+                account.active_campaign = ""
+                account.game = ""
+                self.tbl.item(r,3).setText("")
+                self.tbl.item(r,4).setText("")
+                self.log_line(f"[{login}] Campaign cleared")
+            else:
+                account.active_campaign = camp
+                self.tbl.item(r,3).setText(camp)
+                self.log_line(f"[{login}] Campaign set to {camp}")
+
+        self.loop.create_task(_choose())
 
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
@@ -186,7 +218,7 @@ class MainWindow(QMainWindow):
             if a.login in self.tasks: continue
             stop = asyncio.Event()
             self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
+            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop, a.active_campaign or None))
             self.tasks[a.login] = t
             a.status = "Running"
         self.refresh_totals()
@@ -213,8 +245,14 @@ class MainWindow(QMainWindow):
                 if note:
                     self.log_line(f"[{login}] {note}")
             elif kind == "campaign":
-                self.tbl.item(r,3).setText(p.get("camp","") or "—")
-                self.tbl.item(r,4).setText(p.get("game","") or "—")
+                camp = p.get("camp","") or "—"
+                game = p.get("game","") or "—"
+                self.tbl.item(r,3).setText(camp)
+                self.tbl.item(r,4).setText(game)
+                acc = next((a for a in self.accounts if a.login==login), None)
+                if acc:
+                    acc.active_campaign = camp if camp != "—" else ""
+                    acc.game = game if game != "—" else ""
             elif kind == "progress":
                 self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
                 self.tbl.item(r,6).setText(str(p.get("remain",0)))

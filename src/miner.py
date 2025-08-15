@@ -46,12 +46,68 @@ async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
     # минимальный дашборд дропсов для текущего пользователя
     return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
 
-async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
+
+async def get_active_campaigns(login: str, proxy: Optional[str]) -> list[dict[str, str]]:
+    """Вернуть список активных кампаний для аккаунта.
+
+    Возвращает список словарей вида ``{"id": str, "name": str, "game": str}``.
+    Если авторизация не удалась или кампании не найдены – возвращает пустой список.
+    """
+    cookies_dir = Path("cookies")
+    token = await _read_auth_token(cookies_dir, login)
+    if not token:
+        return []
+
+    headers = {
+        "Client-Id": CLIENT_ID,
+        "Authorization": f"OAuth {token}",
+        "Content-Type": "application/json",
+        "Origin": "https://www.twitch.tv",
+        "Referer": "https://www.twitch.tv/",
+    }
+
+    connector = None
+    if proxy:
+        connector = aiohttp.TCPConnector()
+
+    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+        try:
+            data = await _discover_campaign(session)
+        except Exception:
+            return []
+
+        res: list[dict[str, str]] = []
+        try:
+            d = (data or {}).get("data") or {}
+            vd = d.get("viewer") or d.get("currentUser") or {}
+            drops = vd.get("dropsDashboard") or vd.get("drops") or vd
+
+            if isinstance(drops, dict):
+                campaigns = []
+                if isinstance(drops.get("currentCampaigns"), list):
+                    campaigns = drops["currentCampaigns"]
+                elif isinstance(drops.get("availableCampaigns"), list):
+                    campaigns = drops["availableCampaigns"]
+                elif isinstance(drops.get("campaigns"), list):
+                    campaigns = drops["campaigns"]
+
+                for c in campaigns:
+                    name = c.get("name") or c.get("displayName") or c.get("id", "")
+                    game_obj = c.get("game") or c.get("gameTitle") or {}
+                    game = game_obj.get("name") or game_obj.get("displayName") or ""
+                    cid = c.get("id", "")
+                    res.append({"id": cid, "name": name or cid, "game": game})
+        except Exception:
+            pass
+
+        return res
+
+async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event, campaign: Optional[str] = None):
     """
     Шаг 2a: без видео. Только GQL-дискавери кампаний для аккаунта.
     - читает cookies/<login>.json -> auth-token
     - вызывает ViewerDropsDashboard PQ
-    - обновляет GUI: Status/Campaign/Game
+    - выбирает кампанию ``campaign`` (если задана) и обновляет GUI: Status/Campaign/Game
     """
     cookies_dir = Path("cookies")
     token = await _read_auth_token(cookies_dir, login)
@@ -72,39 +128,49 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
         try:
             data = await _discover_campaign(session)
 
-            # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
-            camp_name = ""
-            game_name = ""
+            # получаем список кампаний и подбираем нужную
+            campaigns = []
+            drops: dict[str, Any] = {}
             try:
                 d = (data or {}).get("data") or {}
                 vd = d.get("viewer") or d.get("currentUser") or {}
                 drops = vd.get("dropsDashboard") or vd.get("drops") or vd
 
                 if isinstance(drops, dict):
-                    # сначала пробуем текущую/активные кампании
-                    campaigns = []
                     if isinstance(drops.get("currentCampaigns"), list):
                         campaigns = drops["currentCampaigns"]
                     elif isinstance(drops.get("availableCampaigns"), list):
                         campaigns = drops["availableCampaigns"]
                     elif isinstance(drops.get("campaigns"), list):
                         campaigns = drops["campaigns"]
+            except Exception:
+                campaigns = []
 
-                    if campaigns:
-                        c0 = campaigns[0]
-                        camp_name = c0.get("name") or c0.get("displayName") or c0.get("id","")
-                        game = c0.get("game") or c0.get("gameTitle") or {}
-                        game_name = (game.get("name") or game.get("displayName") or "")
+            sel = None
+            for c in campaigns:
+                name = c.get("name") or c.get("displayName") or c.get("id", "")
+                if not campaign or campaign == name:
+                    sel = c
+                    break
+            if sel is None and campaigns:
+                sel = campaigns[0]
+
+            camp_name = ""; game_name = ""
+            if sel:
+                camp_name = sel.get("name") or sel.get("displayName") or sel.get("id", "")
+                game = sel.get("game") or sel.get("gameTitle") or {}
+                game_name = game.get("name") or game.get("displayName") or ""
+            else:
                 # fallback — по тексту
-                if not camp_name:
+                try:
                     import re, json as _json
                     txt = _json.dumps(drops)
                     m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"name"\s*:\s*"([^"]+)"', txt)
                     if m: camp_name = m.group(1)
                     m2 = re.search(r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
                     if m2: game_name = m2.group(1)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
             await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
             await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
