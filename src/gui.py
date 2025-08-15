@@ -34,16 +34,29 @@ class MainWindow(QMainWindow):
         self.metrics = {"claimed": 0, "errors": 0}
 
         # ── UI ──────────────────────────────────────────────────────────────────
-        root = QWidget(); self.setCentralWidget(root)
+        root = QWidget()
+        self.setCentralWidget(root)
         v = QVBoxLayout(root)
 
         top = QHBoxLayout()
-        self.lbl = QLabel("—"); top.addWidget(self.lbl); top.addStretch(1)
-        self.btn_check = QPushButton("Проверить GQL"); self.btn_check.clicked.connect(self.check_gql); top.addWidget(self.btn_check)
-        self.btn_onb = QPushButton("Onboarding (Playwright)"); self.btn_onb.clicked.connect(self.onboarding); top.addWidget(self.btn_onb)
-        self.btn_onb2 = QPushButton("Onboarding (WebView)"); self.btn_onb2.clicked.connect(self.onboarding_webview); top.addWidget(self.btn_onb2)
-        self.btn_start = QPushButton("Start All"); self.btn_start.clicked.connect(self.start_all); top.addWidget(self.btn_start)
-        self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
+        self.lbl = QLabel("—")
+        top.addWidget(self.lbl)
+        top.addStretch(1)
+        self.btn_check = QPushButton("Проверить GQL")
+        self.btn_check.clicked.connect(self.check_gql)
+        top.addWidget(self.btn_check)
+        self.btn_onb = QPushButton("Onboarding (Playwright)")
+        self.btn_onb.clicked.connect(self.onboarding)
+        top.addWidget(self.btn_onb)
+        self.btn_onb2 = QPushButton("Onboarding (WebView)")
+        self.btn_onb2.clicked.connect(self.onboarding_webview)
+        top.addWidget(self.btn_onb2)
+        self.btn_start = QPushButton("Start All")
+        self.btn_start.clicked.connect(self.start_all)
+        top.addWidget(self.btn_start)
+        self.btn_stop = QPushButton("Stop All")
+        self.btn_stop.clicked.connect(self.stop_all)
+        top.addWidget(self.btn_stop)
         v.addLayout(top)
 
         self.tbl = QTableWidget(0, 8)
@@ -51,9 +64,12 @@ class MainWindow(QMainWindow):
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         v.addWidget(self.tbl)
 
-        self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        v.addWidget(self.log)
 
-        self.populate(); self.refresh_totals()
+        self.populate()
+        self.refresh_totals()
 
         # ── встроенный asyncio-loop ─────────────────────────────────────────────
         # ВАЖНО: loop живёт в главном потоке; QTimer "тикает" его, чтобы шли задачи.
@@ -64,14 +80,17 @@ class MainWindow(QMainWindow):
         self._feeder_task = self.loop.create_task(self.feeder())
 
         # таймер вызывает короткий прогон цикла, чтобы не блокировать Qt
-        self.timer = QTimer(self); self.timer.setInterval(50)  # 20 FPS малой кровью
-        self.timer.timeout.connect(self.pump); self.timer.start()
+        self.timer = QTimer(self)
+        self.timer.setInterval(50)  # 20 FPS малой кровью
+        self.timer.timeout.connect(self.pump)
+        self.timer.start()
 
     # ── helpers ────────────────────────────────────────────────────────────────
     def populate(self):
         self.tbl.setRowCount(0)
         for a in self.accounts:
-            r = self.tbl.rowCount(); self.tbl.insertRow(r)
+            r = self.tbl.rowCount()
+            self.tbl.insertRow(r)
             for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
                 self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
 
@@ -105,7 +124,8 @@ class MainWindow(QMainWindow):
             if not cookie_file.exists():
                 self.tbl.item(r,2).setText("NO COOKIES")
                 self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
-                miss += 1; continue
+                miss += 1
+                continue
 
             token = ""
             try:
@@ -117,12 +137,14 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.tbl.item(r,2).setText("BAD COOKIES")
                 self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1; continue
+                other += 1
+                continue
 
             if not token:
                 self.tbl.item(r,2).setText("NO TOKEN")
                 self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1; continue
+                miss += 1
+                continue
 
             try:
                 resp = requests.get(
