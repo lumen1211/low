@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 import aiohttp
+import random
+from datetime import datetime
+
+from .twitch_api import TwitchAPI
 
 GQL_URL = "https://gql.twitch.tv/gql"
 CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
@@ -59,61 +63,112 @@ async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio
         await queue.put((login, "error", {"msg": "no cookies/auth-token"}))
         return
 
-    headers = {
-        "Client-Id": CLIENT_ID,
-        "Authorization": f"OAuth {token}",
-        "Content-Type": "application/json",
-        "Origin": "https://www.twitch.tv",
-        "Referer": "https://www.twitch.tv/",
-    }
+    api = TwitchAPI(token, proxy=proxy or "")
+    await api.start()
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
+    await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
+    try:
+        data = await api.viewer_dashboard()
+
+        # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
+        camp_name = ""
+        game_name = ""
+        channel_id = ""
         try:
-            data = await _discover_campaign(session)
+            d = (data or {}).get("data") or {}
+            vd = d.get("viewer") or d.get("currentUser") or {}
+            drops = vd.get("dropsDashboard") or vd.get("drops") or vd
 
-            # Вытаскиваем “как получится” имя кампании и игры (структура у Twitch часто меняется)
-            camp_name = ""
-            game_name = ""
-            try:
-                d = (data or {}).get("data") or {}
-                vd = d.get("viewer") or d.get("currentUser") or {}
-                drops = vd.get("dropsDashboard") or vd.get("drops") or vd
+            if isinstance(drops, dict):
+                # сначала пробуем текущую/активные кампании
+                campaigns = []
+                if isinstance(drops.get("currentCampaigns"), list):
+                    campaigns = drops["currentCampaigns"]
+                elif isinstance(drops.get("availableCampaigns"), list):
+                    campaigns = drops["availableCampaigns"]
+                elif isinstance(drops.get("campaigns"), list):
+                    campaigns = drops["campaigns"]
 
-                if isinstance(drops, dict):
-                    # сначала пробуем текущую/активные кампании
-                    campaigns = []
-                    if isinstance(drops.get("currentCampaigns"), list):
-                        campaigns = drops["currentCampaigns"]
-                    elif isinstance(drops.get("availableCampaigns"), list):
-                        campaigns = drops["availableCampaigns"]
-                    elif isinstance(drops.get("campaigns"), list):
-                        campaigns = drops["campaigns"]
+                if campaigns:
+                    c0 = campaigns[0]
+                    camp_name = c0.get("name") or c0.get("displayName") or c0.get("id", "")
+                    game = c0.get("game") or c0.get("gameTitle") or {}
+                    game_name = (game.get("name") or game.get("displayName") or "")
+                    ch = c0.get("self") or c0.get("channel") or {}
+                    channel_id = ch.get("channelId") or ch.get("id") or ""
+            # fallback — по тексту
+            if not camp_name:
+                import re, json as _json
+                txt = _json.dumps(drops)
+                m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"name"\s*:\s*"([^"]+)"', txt)
+                if m:
+                    camp_name = m.group(1)
+                m2 = re.search(r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
+                if m2:
+                    game_name = m2.group(1)
+        except Exception:
+            pass
 
-                    if campaigns:
-                        c0 = campaigns[0]
-                        camp_name = c0.get("name") or c0.get("displayName") or c0.get("id","")
-                        game = c0.get("game") or c0.get("gameTitle") or {}
-                        game_name = (game.get("name") or game.get("displayName") or "")
-                # fallback — по тексту
-                if not camp_name:
-                    import re, json as _json
-                    txt = _json.dumps(drops)
-                    m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"name"\s*:\s*"([^"]+)"', txt)
-                    if m: camp_name = m.group(1)
-                    m2 = re.search(r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
-                    if m2: game_name = m2.group(1)
-            except Exception:
-                pass
+        await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
+        await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-            await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
-            await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
+        loop = asyncio.get_event_loop()
+        next_inv = loop.time()
+        next_inc = loop.time()
 
-            # Пока просто ждём Stop (заготовка под 2b: heartbeats/прогресс)
-            while not stop_evt.is_set():
-                await asyncio.sleep(1.0)
+        def find_drop(obj):
+            if isinstance(obj, dict):
+                if all(k in obj for k in ("requiredMinutesWatched", "currentMinutesWatched", "dropInstanceID")):
+                    return obj
+                for v in obj.values():
+                    r = find_drop(v)
+                    if r:
+                        return r
+            elif isinstance(obj, list):
+                for item in obj:
+                    r = find_drop(item)
+                    if r:
+                        return r
+            return None
 
-            await queue.put((login, "status", {"status": "Stopped"}))
+        while not stop_evt.is_set():
+            now = loop.time()
 
-        except Exception as e:
-            await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+            if channel_id and now >= next_inc:
+                try:
+                    await api.increment(channel_id)
+                except (aiohttp.ClientError, RuntimeError) as e:
+                    await queue.put((login, "error", {"msg": str(e)}))
+                next_inc = now + 60
+
+            if now >= next_inv:
+                try:
+                    inv = await api.inventory()
+                    drop = find_drop(inv)
+                    if drop:
+                        req = drop.get("requiredMinutesWatched") or 0
+                        cur = drop.get("currentMinutesWatched") or 0
+                        did = drop.get("dropInstanceID") or ""
+                        drop_name = drop.get("name") or drop.get("benefit", {}).get("name", "")
+                        pct = (cur / req * 100) if req else 0
+                        remain = max(0, req - cur)
+                        await queue.put((login, "progress", {"pct": pct, "remain": remain}))
+                        if pct >= 100 and did:
+                            try:
+                                await api.claim(did)
+                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                await queue.put((login, "claimed", {"drop": drop_name, "at": ts}))
+                            except (aiohttp.ClientError, RuntimeError) as e:
+                                await queue.put((login, "error", {"msg": str(e)}))
+                except (aiohttp.ClientError, RuntimeError) as e:
+                    await queue.put((login, "error", {"msg": str(e)}))
+                next_inv = now + random.uniform(120, 180)
+
+            await asyncio.sleep(1.0)
+
+        await queue.put((login, "status", {"status": "Stopped"}))
+
+    except Exception as e:
+        await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+    finally:
+        await api.close()
