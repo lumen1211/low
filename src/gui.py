@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QInputDialog
 )
 from PySide6.QtCore import QTimer
 
@@ -15,7 +15,7 @@ from .types import Account
 from .accounts import load_accounts, COOKIES_DIR
 from .onboarding import bulk_onboarding
 from .onboarding_webview import WebOnboarding, Account as WVAccount
-from .miner import run_account  # <- асинхронный воркер (aiohttp)
+from .miner import run_account, fetch_campaigns  # <- асинхронный воркер (aiohttp)
 from .ops import load_ops, missing_ops
 
 
@@ -183,10 +183,34 @@ class MainWindow(QMainWindow):
     def start_all(self):
         # создаём/пересоздаём задачи в нашем asyncio-цикле
         for a in self.accounts:
-            if a.login in self.tasks: continue
+            if a.login in self.tasks:
+                continue
+
+            # получаем список кампаний для аккаунта
+            camps = self.loop.run_until_complete(fetch_campaigns(a.login, a.proxy))
+            if not camps:
+                self.log_line(f"[{a.login}] Нет активных кампаний")
+                continue
+
+            items = [f"{c['name']} ({c['game']})" for c in camps]
+            choice, ok = QInputDialog.getItem(
+                self, "Выбор кампании", f"{a.login}: выберите кампанию", items, 0, False
+            )
+            if not ok:
+                self.log_line(f"[{a.login}] Выбор кампании отменён")
+                continue
+
+            camp = camps[items.index(choice)]
+            r = self.row_of(a.login)
+            if r >= 0:
+                self.tbl.item(r, 3).setText(camp["name"])
+                self.tbl.item(r, 4).setText(camp["game"])
+
             stop = asyncio.Event()
             self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
+            t = self.loop.create_task(
+                run_account(a.login, a.proxy, self.queue, stop, campaign_id=camp["id"])
+            )
             self.tasks[a.login] = t
             a.status = "Running"
         self.refresh_totals()
