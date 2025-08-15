@@ -2,10 +2,10 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main ]     # проверяем каждый PR в main
   push:
-    branches: [ main ]
-  workflow_dispatch: {}
+    branches: [ main ]     # и каждый пуш в main
+  workflow_dispatch: {}     # возможность запустить вручную из вкладки Actions
 
 jobs:
   tests:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
+      contents: read        # минимально нужные права
 
     steps:
       - uses: actions/checkout@v4
@@ -24,21 +24,25 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          # если есть requirements.txt — ставим зависимости проекта
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # если используете pyproject.toml с extras [dev] — попробуем их поставить
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || true; fi
+          # ОБЯЗАТЕЛЬНО ставим pytest (раньше из-за его отсутствия всё падало)
+          pip install pytest
 
       - name: Run unit tests
         run: |
-          pytest -q --maxfail=1 --disable-warnings || (echo "Pytests failed" && exit 1)
+          pytest -q --maxfail=1 --disable-warnings
 
-  run_app_headless:
-    name: Run app (headless) + capture screenshot
-    # запустим только на PR и вручную; если хотите и на push — уберите условие
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
+  run_app:
+    name: Run app (headless) + capture logs/screenshot
     runs-on: ubuntu-latest
     needs: tests
+    if: ${{ always() }}    # запустить даже если tests упали — чтобы увидеть, что происходит
 
     permissions:
       contents: read
@@ -52,54 +56,54 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install system packages (xvfb, imagemagick)
+      - name: Install system packages for headless GUI
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-apps imagemagick
+          sudo apt-get install -y xvfb imagemagick \
+            libgl1 libxkbcommon-x11-0 libxrender1 libxrandr2 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 libxcb-image0 \
+            fonts-dejavu
 
-      - name: Install Python deps
+      - name: Install Python deps for app
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # на случай, если GUI на PySide6 или PyQt5 — ставим то, что найдётся
+          pip install PySide6 || pip install PyQt5 || true
 
-      # ВАЖНО: замените команду запуска на реальную для вашего приложения
-      # Например, если у вас PyQt/PySide GUI: src/gui.py
-      # Мы запускаем под Xvfb, ждём несколько секунд, делаем скрин, сохраняем логи.
+      # Если у вас не GUI, а консольное приложение — замените команду запуска ниже.
       - name: Run app under Xvfb and take screenshot
         shell: bash
         env:
-          QT_QPA_PLATFORM: xcb      # для Qt/ПайСайд; можно попробовать offscreen, если окно не нужно
+          DISPLAY: ":99"
+          APP_ENTRY: "src/gui.py"     # ← ПРИ НУЖДЕ ИЗМЕНИТЕ на вашу точку входа, например src/miner.py
         run: |
           set -e
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1920x1080x24 &  # старт виртуального дисплея
+          Xvfb :99 -screen 0 1920x1080x24 &
           XVFB_PID=$!
-          echo "Xvfb PID: ${XVFB_PID}"
+          sleep 1
 
-          # Запуск приложения в фоне, вывод в лог
-          (python src/gui.py > run.log 2>&1 &) || true
+          echo "[CI] launching app: ${APP_ENTRY}"
+          (python "${APP_ENTRY}" > run.log 2>&1 &) || true
           APP_PID=$!
-          echo "App PID: ${APP_PID}"
 
-          # даём времени приложению отрисоваться
+          # даём приложению шанс запуститься/что-то вывести
           sleep 8
 
-          # скриншот всего экрана (окна) в файл
+          # делаем скрин «экрана» (если GUI действительно рисует окно)
           import -window root screenshot.png || true
 
-          # аккуратно завершаем приложение
+          # завершаем приложение
           kill ${APP_PID} 2>/dev/null || true
           sleep 1
           kill -9 ${APP_PID} 2>/dev/null || true
-
-          # останавливаем Xvfb
           kill ${XVFB_PID} 2>/dev/null || true
 
       - name: Upload artifacts (logs + screenshot)
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: app-run-artifacts
+          name: app-run
           path: |
             run.log
             screenshot.png
