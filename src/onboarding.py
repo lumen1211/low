@@ -11,7 +11,7 @@ LOGIN_URL = "https://www.twitch.tv/login?no-reload=true"
 
 # ───────── helpers ─────────
 
-def _launch_browser(p):
+def _launch_browser(p, proxy: Optional[str] = None):
     args = [
         "--disable-blink-features=AutomationControlled",
         "--disable-extensions",
@@ -22,15 +22,19 @@ def _launch_browser(p):
     if os.environ.get("TW_ONB_DISABLE_GPU", "0") == "1":
         args += ["--disable-gpu", "--disable-software-rasterizer"]
 
+    launch_kwargs = {"headless": False, "args": args}
+    if proxy:
+        launch_kwargs["proxy"] = {"server": proxy}
+
     for channel in ("chrome", "msedge", None):
         try:
             if channel:
-                return p.chromium.launch(channel=channel, headless=False, args=args)
+                return p.chromium.launch(channel=channel, **launch_kwargs)
             else:
-                return p.chromium.launch(headless=False, args=args)
+                return p.chromium.launch(**launch_kwargs)
         except Exception:
             continue
-    return p.chromium.launch(headless=False)
+    return p.chromium.launch(**launch_kwargs)
 
 def _cookies_map(context) -> Dict[str, str]:
     try:
@@ -200,19 +204,19 @@ def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
 
 # ───────── public API ─────────
 
-def login_and_save_cookies(login: str, password: str, out_path: Path, totp_secret: str = "", timeout_s: int = 180) -> dict:
-    res = bulk_onboarding([(login, password, totp_secret)], out_dir=out_path.parent, timeout_s=timeout_s)
+def login_and_save_cookies(login: str, password: str, out_path: Path, totp_secret: str = "", proxy: str = "", timeout_s: int = 180) -> dict:
+    res = bulk_onboarding([(login, password, totp_secret, proxy)], out_dir=out_path.parent, timeout_s=timeout_s)
     return res[0] if res else {"result": "FAILED", "note": "unknown error"}
 
 def bulk_onboarding(
-    accounts: Iterable[Tuple[str, str, str]],
+    accounts: Iterable[Tuple[str, str, str, str]],
     out_dir: Path,
     timeout_s: int = 180,
     progress_cb: Optional[Callable[[Dict[str, str]], None]] = None,
     accounts_file: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
     """
-    Один браузер Playwright, один таб. Для аккаунтов:
+    Для каждого аккаунта запускаем браузер Playwright.
       - OK → сохраняем cookies/<login>.json
       - EMAIL_2FA_REQUIRED → SKIP
       - USERNAME_NOT_FOUND → DELETE и удаляем из accounts.txt (если указан путь)
@@ -221,14 +225,12 @@ def bulk_onboarding(
     results: List[Dict[str, str]] = []
 
     with sync_playwright() as p:
-        browser = _launch_browser(p)
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = context.new_page(); page.bring_to_front()
-
-        for login, password, totp in accounts:
+        for login, password, totp, proxy in accounts:
             progress_cb and progress_cb({"login": login, "result": "STEP", "note": "Открываю форму логина"})
-            try: context.clear_cookies()
-            except Exception: pass
+
+            browser = _launch_browser(p, proxy or None)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            page = context.new_page(); page.bring_to_front()
 
             _goto(page, LOGIN_URL)
             _dismiss_consent(page)
@@ -287,9 +289,9 @@ def bulk_onboarding(
                 res = {"login": login, "result": "FAILED", "note": last_err or "Пер-аккаунт таймаут"}
                 results.append(res); progress_cb and progress_cb(res)
 
-        try: context.close()
-        except Exception: pass
-        try: browser.close()
-        except Exception: pass
+            try: context.close()
+            except Exception: pass
+            try: browser.close()
+            except Exception: pass
 
     return results
