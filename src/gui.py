@@ -46,8 +46,8 @@ class MainWindow(QMainWindow):
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
 
-        self.tbl = QTableWidget(0, 8)
-        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Progress","Remain (min)","Last claim"])
+        self.tbl = QTableWidget(0, 9)
+        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Progress","Remain (min)","Last claim","Action"])
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         v.addWidget(self.tbl)
 
@@ -74,6 +74,9 @@ class MainWindow(QMainWindow):
             r = self.tbl.rowCount(); self.tbl.insertRow(r)
             for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
                 self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
+            btn = QPushButton("Start")
+            btn.clicked.connect(lambda _, l=a.login: self.start_stop_account(l))
+            self.tbl.setCellWidget(r, 8, btn)
 
     def row_of(self, login: str) -> int:
         for r in range(self.tbl.rowCount()):
@@ -83,10 +86,11 @@ class MainWindow(QMainWindow):
     def log_line(self, s: str): self.log.append(s)
 
     def refresh_totals(self):
-        active = sum(1 for a in self.accounts if a.status=="Running")
+        active = len(self.tasks)
         self.lbl.setText(f"Аккаунтов: {len(self.accounts)} • Активных: {active} • Клеймов: {self.metrics['claimed']} • Ошибок: {self.metrics['errors']}")
 
     def _remove_account_from_ui(self, login: str):
+        self.stop_account(login)
         r = self.row_of(login)
         if r >= 0: self.tbl.removeRow(r)
         self.accounts = [a for a in self.accounts if a.login != login]
@@ -180,25 +184,55 @@ class MainWindow(QMainWindow):
         dlg.exec()
         self.log_line("Onboarding (WebView) завершён; cookies сохранены.")
 
-    def start_all(self):
-        # создаём/пересоздаём задачи в нашем asyncio-цикле
-        for a in self.accounts:
-            if a.login in self.tasks: continue
-            stop = asyncio.Event()
-            self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
-            self.tasks[a.login] = t
-            a.status = "Running"
+    # запуск/остановка одного аккаунта
+    def start_account(self, login: str):
+        if login in self.tasks:
+            return
+        acc = next((a for a in self.accounts if a.login == login), None)
+        if not acc:
+            return
+        stop = asyncio.Event()
+        self.stops[login] = stop
+        t = self.loop.create_task(run_account(login, acc.proxy, self.queue, stop))
+        self.tasks[login] = t
+        acc.status = "Running"
+        r = self.row_of(login)
+        if r >= 0:
+            btn = self.tbl.cellWidget(r, 8)
+            if isinstance(btn, QPushButton):
+                btn.setText("Stop")
+            self.tbl.item(r,2).setText("Starting")
         self.refresh_totals()
 
-    def stop_all(self):
-        for s in self.stops.values():
-            s.set()
-        self.stops.clear()
-        self.tasks.clear()
-        for a in self.accounts:
-            a.status = "Stopped"
+    def stop_account(self, login: str):
+        evt = self.stops.pop(login, None)
+        if evt:
+            evt.set()
+        self.tasks.pop(login, None)
+        acc = next((a for a in self.accounts if a.login == login), None)
+        if acc:
+            acc.status = "Stopped"
+        r = self.row_of(login)
+        if r >= 0:
+            btn = self.tbl.cellWidget(r, 8)
+            if isinstance(btn, QPushButton):
+                btn.setText("Start")
+            self.tbl.item(r,2).setText("Stopped")
         self.refresh_totals()
+
+    def start_stop_account(self, login: str):
+        if login in self.tasks:
+            self.stop_account(login)
+        else:
+            self.start_account(login)
+
+    def start_all(self):
+        for a in self.accounts:
+            self.start_account(a.login)
+
+    def stop_all(self):
+        for login in list(self.tasks.keys()):
+            self.stop_account(login)
 
     # ── корутина-приёмник сообщений от miner.py ───────────────────────────────
     async def feeder(self):
