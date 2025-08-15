@@ -234,3 +234,31 @@ class MainWindow(QMainWindow):
             self.loop.run_until_complete(asyncio.sleep(0))
         except Exception:
             pass
+
+    # ── корректное завершение работы при закрытии окна ───────────────────────
+    def closeEvent(self, event):
+        # сначала пытаемся остановить все аккаунты
+        tasks = list(self.tasks.values())
+        feeder = self._feeder_task
+        self.stop_all()
+        self.timer.stop()
+
+        # отменяем оставшиеся задачи и ждём их завершения
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        if feeder and not feeder.done():
+            feeder.cancel()
+            tasks.append(feeder)
+        if tasks:
+            try:
+                self.loop.run_until_complete(
+                    asyncio.gather(*tasks, return_exceptions=True)
+                )
+            except Exception:
+                pass
+
+        # останавливаем и закрываем цикл событий
+        self.loop.stop()
+        self.loop.close()
+        super().closeEvent(event)
