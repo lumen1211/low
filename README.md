@@ -1,5 +1,6 @@
 # Twitch Drops — API Miner (No Video) + GUI
 **Поддержка TXT формата `login:password`** (а также `login:password:totp:proxy`).
+Прокси из последнего поля используется при запросах к Twitch API.
 
 ## Запуск
 ```bash
