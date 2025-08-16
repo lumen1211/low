@@ -182,7 +182,8 @@ def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
             raw = line.rstrip("\r\n")
             s = raw.strip()
             if not s:
-                out.append(raw); continue
+                out.append(raw)
+                continue
             # "login:pass" (твоя схема) — самое надёжное
             if s.startswith(f"{login}:"):
                 removed = True
@@ -217,13 +218,15 @@ def bulk_onboarding(
       - EMAIL_2FA_REQUIRED → SKIP
       - USERNAME_NOT_FOUND → DELETE и удаляем из accounts.txt (если указан путь)
     """
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     results: List[Dict[str, str]] = []
 
     with sync_playwright() as p:
         browser = _launch_browser(p)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = context.new_page(); page.bring_to_front()
+        page = context.new_page()
+        page.bring_to_front()
 
         for login, password, totp in accounts:
             progress_cb and progress_cb({"login": login, "result": "STEP", "note": "Открываю форму логина"})
@@ -258,14 +261,16 @@ def bulk_onboarding(
                     out_path = out_dir / f"{login}.json"
                     out_path.write_text(json.dumps(context.cookies(), indent=2, ensure_ascii=False), encoding="utf-8")
                     res = {"login": login, "result": "OK", "note": f"cookies → {out_path}"}
-                    results.append(res); progress_cb and progress_cb(res)
+                    results.append(res)
+                    progress_cb and progress_cb(res)
                     saved = True
                     break
 
                 # особые кейсы — чтобы не виснуть
                 if _email_challenge_present(page):
                     res = {"login": login, "result": "SKIP", "note": "EMAIL_2FA_REQUIRED"}
-                    results.append(res); progress_cb and progress_cb(res)
+                    results.append(res)
+                    progress_cb and progress_cb(res)
                     saved = True
                     break
 
@@ -277,7 +282,8 @@ def bulk_onboarding(
                         if removed:
                             note += " — removed from accounts.txt"
                     res = {"login": login, "result": "DELETE", "note": note}
-                    results.append(res); progress_cb and progress_cb(res)
+                    results.append(res)
+                    progress_cb and progress_cb(res)
                     saved = True
                     break
 
@@ -285,7 +291,8 @@ def bulk_onboarding(
 
             if not saved:
                 res = {"login": login, "result": "FAILED", "note": last_err or "Пер-аккаунт таймаут"}
-                results.append(res); progress_cb and progress_cb(res)
+                results.append(res)
+                progress_cb and progress_cb(res)
 
         try: context.close()
         except Exception: pass
