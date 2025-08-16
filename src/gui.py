@@ -7,7 +7,7 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QProgressBar,
     QInputDialog, QMessageBox, QComboBox
 )
 from PySide6.QtCore import QTimer
@@ -105,8 +105,8 @@ class MainWindow(QMainWindow):
             r = self.tbl.rowCount()
             self.tbl.insertRow(r)
 
-            # Колонки: Label, Login, Status, Campaign(cmb), Game, Channels, Progress, Remain, Last, Action
-            values = [a.label, a.login, a.status, None, "", "—", "0%", "0", ""]
+            # Колонки: Label, Login, Status, Campaign(cmb), Game, Channels, Progress(QProgressBar), Remain, Last, Action
+            values = [a.label, a.login, a.status, None, "", "—", "", "0", ""]
             for i in range(9):
                 if i == 3:  # Campaign — выпадающий список
                     cmb = QComboBox()
@@ -115,6 +115,12 @@ class MainWindow(QMainWindow):
                     )
                     self.tbl.setCellWidget(r, i, cmb)
                     self.cmb_campaigns[a.login] = cmb
+                elif i == 6:
+                    pb = QProgressBar()
+                    pb.setRange(0, 100)
+                    pb.setValue(0)
+                    pb.setFormat("%p%")
+                    self.tbl.setCellWidget(r, i, pb)
                 else:
                     self.tbl.setItem(r, i, QTableWidgetItem(str(values[i])))
 
@@ -142,6 +148,16 @@ class MainWindow(QMainWindow):
                 a.campaign_id = cid or ""
                 a.active_campaign = name or ""
                 break
+
+    def _fmt_seconds(self, secs: int) -> str:
+        try:
+            m, s = divmod(int(secs), 60)
+            h, m = divmod(m, 60)
+            if h:
+                return f"{h:02d}:{m:02d}:{s:02d}"
+            return f"{m:02d}:{s:02d}"
+        except Exception:
+            return "—"
 
     def log_line(self, s: str): self.log.append(s)
 
@@ -379,10 +395,27 @@ class MainWindow(QMainWindow):
                 if chan:
                     self.log_line(f"[{login}] switched to {chan}")
             elif kind == "progress":
-                self.tbl.item(r, 6).setText(f"{p.get('pct', 0):.0f}%")
-                self.tbl.item(r, 7).setText(str(p.get("remain", 0)))
+                # поддерживаем и старый remain, и новый next (+ опциональный drop)
+                pb = self.tbl.cellWidget(r, 6)
+                if isinstance(pb, QProgressBar):
+                    pb.setValue(int(p.get("pct", 0)))
+                    drop = p.get("drop")
+                    pb.setFormat(f"{drop} %p%" if drop else "%p%")
+                remain_secs = p.get("remain")
+                if remain_secs is None:
+                    remain_secs = p.get("next", 0)
+                self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
             elif kind == "claimed":
                 self.metrics["claimed"] += 1
+                pb = self.tbl.cellWidget(r, 6)
+                if isinstance(pb, QProgressBar):
+                    pb.setValue(int(p.get("pct", 0)))
+                    drop = p.get("drop")
+                    pb.setFormat(f"{drop} %p%" if drop else "%p%")
+                remain_secs = p.get("remain")
+                if remain_secs is None:
+                    remain_secs = p.get("next", 0)
+                self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
                 self.tbl.item(r, 8).setText(p.get("at", ""))
                 self.log_line(f"[{login}] Claimed {p.get('drop', '')}")
             elif kind == "error":
@@ -412,4 +445,3 @@ class MainWindow(QMainWindow):
         self.loop.stop()
         self.loop.close()
         super().closeEvent(event)
-
