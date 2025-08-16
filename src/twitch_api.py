@@ -53,3 +53,22 @@ class TwitchAPI:
     async def inventory(self) -> Any: return await self.gql("Inventory", {})
     async def increment(self, channel_id: str) -> Any: return await self.gql("IncrementDropCurrentSessionProgress", {"channelID": channel_id})
     async def claim(self, drop_instance_id: str) -> Any: return await self.gql("ClaimDropReward", {"dropInstanceID": drop_instance_id})
+    async def campaign_details(self, campaign_id: str) -> Any: return await self.gql("DropsCampaignDetails", {"campaignID": campaign_id})
+
+    async def get_live_channels(self, campaign_id: str) -> list[tuple[str,int,bool]]:
+        data = await self.campaign_details(campaign_id)
+        channels: list[tuple[str,int,bool]] = []
+        try:
+            d = (data or {}).get("data") or {}
+            camp = d.get("campaign") or d.get("dropsCampaign") or {}
+            avail = camp.get("availableChannels") or camp.get("channels") or []
+            for ch in avail:
+                chan = ch.get("channel") if isinstance(ch.get("channel"), dict) else ch
+                cid = (chan or {}).get("id") or ch.get("id") or ""
+                stream = (chan or {}).get("stream") or ch.get("stream") or {}
+                live = bool(stream)
+                viewers = stream.get("viewersCount") or 0
+                channels.append((cid, viewers, live))
+        except Exception:
+            pass
+        return channels
