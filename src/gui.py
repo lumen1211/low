@@ -26,7 +26,7 @@ class MainWindow(QMainWindow):
     def __init__(self, accounts_file: Path):
         super().__init__()
         self.setWindowTitle("Twitch Drops — API Miner (TXT/CSV)")
-        self.resize(1100, 700)
+        self.resize(1200, 720)
 
         self.accounts_file = Path(accounts_file)
         self.accounts: list[Account] = load_accounts(self.accounts_file)
@@ -71,10 +71,12 @@ class MainWindow(QMainWindow):
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
 
-        self.tbl = QTableWidget(0, 9)
-        self.tbl.setHorizontalHeaderLabels(
-            ["Label","Login","Status","Campaign","Game","Channels","Progress","Remain (min)","Last claim"]
-        )
+        # 10 колонок: добавили "Action" в конце
+        self.tbl = QTableWidget(0, 10)
+        self.tbl.setHorizontalHeaderLabels([
+            "Label","Login","Status","Campaign","Game","Channels",
+            "Progress","Remain (min)","Last claim","Action"
+        ])
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl.cellDoubleClicked.connect(self.cell_dbl_clicked)
         v.addWidget(self.tbl)
@@ -103,7 +105,7 @@ class MainWindow(QMainWindow):
             r = self.tbl.rowCount()
             self.tbl.insertRow(r)
 
-            # Колонки: Label, Login, Status, Campaign(cmb), Game, Channels, Progress, Remain, Last claim
+            # Колонки: Label, Login, Status, Campaign(cmb), Game, Channels, Progress, Remain, Last, Action
             values = [a.label, a.login, a.status, None, "", "—", "0%", "0", ""]
             for i in range(9):
                 if i == 3:  # Campaign — выпадающий список
@@ -116,9 +118,15 @@ class MainWindow(QMainWindow):
                 else:
                     self.tbl.setItem(r, i, QTableWidgetItem(str(values[i])))
 
+            # Action button (колонка 9)
+            btn = QPushButton("Start")
+            btn.clicked.connect(lambda _, l=a.login: self.start_stop_account(l))
+            self.tbl.setCellWidget(r, 9, btn)
+
     def row_of(self, login: str) -> int:
         for r in range(self.tbl.rowCount()):
-            if self.tbl.item(r, 1).text() == login:
+            item = self.tbl.item(r, 1)
+            if item and item.text() == login:
                 return r
         return -1
 
@@ -138,13 +146,14 @@ class MainWindow(QMainWindow):
     def log_line(self, s: str): self.log.append(s)
 
     def refresh_totals(self):
-        active = sum(1 for a in self.accounts if a.status == "Running")
+        active = len(self.tasks)
         self.lbl.setText(
             f"Аккаунтов: {len(self.accounts)} • Активных: {active} • "
             f"Клеймов: {self.metrics['claimed']} • Ошибок: {self.metrics['errors']}"
         )
 
     def _remove_account_from_ui(self, login: str):
+        self.stop_account(login)
         r = self.row_of(login)
         if r >= 0:
             self.tbl.removeRow(r)
@@ -281,35 +290,58 @@ class MainWindow(QMainWindow):
             if q:
                 q.put_nowait(("select_campaigns", ids))
 
-    def start_all(self):
-        # очищаем завершённые задачи
-        for login, t in list(self.tasks.items()):
-            if t.done():
-                self.tasks.pop(login, None)
-        # создаём/пересоздаём задачи
-        for a in self.accounts:
-            if a.login in self.tasks:
-                continue
-            stop = asyncio.Event()
-            self.stops[a.login] = stop
-
-            cmd_q = asyncio.Queue()
-            self.cmds[a.login] = cmd_q
-
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop, cmd_q))
-            self.tasks[a.login] = t
-            a.status = "Running"
+    # ── пер-аккаунтный запуск/остановка ────────────────────────────────────────
+    def start_account(self, login: str):
+        if login in self.tasks:
+            return
+        acc = next((a for a in self.accounts if a.login == login), None)
+        if not acc:
+            return
+        stop = asyncio.Event()
+        self.stops[login] = stop
+        cmd_q: asyncio.Queue = asyncio.Queue()
+        self.cmds[login] = cmd_q
+        t = self.loop.create_task(run_account(login, acc.proxy, self.queue, stop, cmd_q))
+        self.tasks[login] = t
+        acc.status = "Running"
+        r = self.row_of(login)
+        if r >= 0:
+            btn = self.tbl.cellWidget(r, 9)
+            if isinstance(btn, QPushButton):
+                btn.setText("Stop")
+            self.tbl.item(r, 2).setText("Starting")
         self.refresh_totals()
+
+    def stop_account(self, login: str):
+        evt = self.stops.pop(login, None)
+        if evt:
+            evt.set()
+        self.tasks.pop(login, None)
+        self.cmds.pop(login, None)
+        acc = next((a for a in self.accounts if a.login == login), None)
+        if acc:
+            acc.status = "Stopped"
+        r = self.row_of(login)
+        if r >= 0:
+            btn = self.tbl.cellWidget(r, 9)
+            if isinstance(btn, QPushButton):
+                btn.setText("Start")
+            self.tbl.item(r, 2).setText("Stopped")
+        self.refresh_totals()
+
+    def start_stop_account(self, login: str):
+        if login in self.tasks:
+            self.stop_account(login)
+        else:
+            self.start_account(login)
+
+    def start_all(self):
+        for a in self.accounts:
+            self.start_account(a.login)
 
     def stop_all(self):
-        for s in self.stops.values():
-            s.set()
-        self.stops.clear()
-        self.tasks.clear()
-        self.cmds.clear()
-        for a in self.accounts:
-            a.status = "Stopped"
-        self.refresh_totals()
+        for login in list(self.tasks.keys()):
+            self.stop_account(login)
 
     # ── корутина-приёмник сообщений от miner.py ────────────────────────────────
     async def feeder(self):
