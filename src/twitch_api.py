@@ -8,7 +8,9 @@ GQL = URL("https://gql.twitch.tv/gql")
 
 class TwitchAPI:
     def __init__(self, auth_token: str, client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko", proxy: str = ""):
-        self.auth = auth_token; self.client_id = client_id; self.proxy = proxy or None
+        self.auth = auth_token
+        self.client_id = client_id
+        self.proxy = proxy or None
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
         self.ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -36,7 +38,9 @@ class TwitchAPI:
                     "Content-Type": "application/json",
                 }) as r:
                     if r.status == 429:
-                        await asyncio.sleep(min(60, 2**attempt)); attempt += 1; continue
+                        await asyncio.sleep(min(60, 2**attempt))
+                        attempt += 1
+                        continue
                     if 200 <= r.status < 300:
                         data = await r.json()
                         if isinstance(data, list): data = data[0]
@@ -46,8 +50,10 @@ class TwitchAPI:
                     text = await r.text()
                     raise RuntimeError(f"GQL {r.status}: {text}")
             except aiohttp.ClientError:
-                await asyncio.sleep(min(60, 2**attempt)); attempt += 1
-                if attempt > 5: raise
+                await asyncio.sleep(min(60, 2**attempt))
+                attempt += 1
+                if attempt > 5:
+                    raise
 
     async def viewer_dashboard(self) -> Any: return await self.gql("ViewerDropsDashboard", {})
     async def inventory(self) -> Any: return await self.gql("Inventory", {})

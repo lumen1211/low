@@ -4,7 +4,8 @@ from typing import List, Optional
 import csv, json
 from .types import Account
 
-COOKIES_DIR = Path("cookies"); COOKIES_DIR.mkdir(exist_ok=True)
+COOKIES_DIR = Path("cookies")
+COOKIES_DIR.mkdir(exist_ok=True)
 
 def _parse_txt(path: Path) -> list[Account]:
     res: list[Account] = []

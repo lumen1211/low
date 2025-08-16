@@ -56,7 +56,8 @@ class MainWindow(QMainWindow):
         self.cmb_campaigns: dict[str, QComboBox] = {}
 
         # ── UI ──────────────────────────────────────────────────────────────────
-        root = QWidget(); self.setCentralWidget(root)
+        root = QWidget()
+        self.setCentralWidget(root)
         v = QVBoxLayout(root)
 
         top = QHBoxLayout()
@@ -77,9 +78,12 @@ class MainWindow(QMainWindow):
         self.tbl.cellDoubleClicked.connect(self.cell_dbl_clicked)
         v.addWidget(self.tbl)
 
-        self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        v.addWidget(self.log)
 
-        self.populate(); self.refresh_totals()
+        self.populate()
+        self.refresh_totals()
 
         # ── встроенный asyncio-loop ─────────────────────────────────────────────
         self.loop = asyncio.new_event_loop()
@@ -192,169 +196,4 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.tbl.item(r, 2).setText("BAD COOKIES")
                 self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1
-                continue
 
-            if not token:
-                self.tbl.item(r, 2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1
-                continue
-
-            try:
-                resp = requests.get(
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {token}"},
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    self.tbl.item(r, 2).setText("OK")
-                    j = resp.json()
-                    login_resp = j.get("login", "?")
-                    scopes = ",".join(j.get("scopes", []))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
-                    ok += 1
-                elif resp.status_code in (401, 403):
-                    self.tbl.item(r, 2).setText("EXPIRED")
-                    self.log_line(f"[{login}] EXPIRED — token invalid")
-                    exp += 1
-                else:
-                    self.tbl.item(r, 2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
-                    other += 1
-            except Exception as e:
-                self.tbl.item(r, 2).setText("ERROR")
-                self.log_line(f"[{login}] ERROR — {e}")
-                other += 1
-
-        self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
-
-    def _on_onboarding_progress(self, res: dict):
-        login = res.get("login", "?")
-        result = res.get("result", "")
-        note = res.get("note", "")
-        if result == "STEP":
-            self.log_line(f"[{login}] {note}")
-        else:
-            self.log_line(f"[{login}] {result} — {note}")
-        if result == "DELETE":
-            self._remove_account_from_ui(login)
-
-    def onboarding(self):
-        rows = [(a.login, a.password or "", a.totp_secret or "") for a in self.accounts]
-        self.log_line(f"Onboarding: запускаю, всего аккаунтов: {len(rows)}")
-        bulk_onboarding(
-            rows, out_dir=COOKIES_DIR, timeout_s=180,
-            progress_cb=self._on_onboarding_progress, accounts_file=self.accounts_file,
-        )
-
-    def onboarding_webview(self):
-        accs = [WVAccount(label=a.label, login=a.login, password=a.password or "") for a in self.accounts]
-        dlg = WebOnboarding(cookies_dir=Path("cookies"), accounts=accs, per_acc_timeout_sec=120, parent=self)
-        dlg.exec()
-        self.log_line("Onboarding (WebView) завершён; cookies сохранены.")
-
-    def campaign_settings(self):
-        """Открыть диалог выбора кампаний для текущего аккаунта."""
-        r = self.tbl.currentRow()
-        if r < 0:
-            return
-        login = self.tbl.item(r, 1).text()
-        campaigns = self.available_campaigns.get(login, [])
-        if not campaigns:
-            self.log_line(f"[{login}] Нет данных о кампаниях")
-            return
-        selected = self.selected_campaigns.get(login, [c.get("id") for c in campaigns])
-        dlg = CampaignSettingsDialog(campaigns, selected, self)
-        if dlg.exec():
-            ids = dlg.selected()
-            self.selected_campaigns[login] = ids
-            q = self.cmds.get(login)
-            if q:
-                q.put_nowait(("select_campaigns", ids))
-
-    def start_all(self):
-        # очищаем завершённые задачи
-        for login, t in list(self.tasks.items()):
-            if t.done():
-                self.tasks.pop(login, None)
-        # создаём/пересоздаём задачи
-        for a in self.accounts:
-            if a.login in self.tasks:
-                continue
-            stop = asyncio.Event()
-            self.stops[a.login] = stop
-
-            cmd_q = asyncio.Queue()
-            self.cmds[a.login] = cmd_q
-
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop, cmd_q))
-            self.tasks[a.login] = t
-            a.status = "Running"
-        self.refresh_totals()
-
-    def stop_all(self):
-        for s in self.stops.values():
-            s.set()
-        self.stops.clear()
-        self.tasks.clear()
-        self.cmds.clear()
-        for a in self.accounts:
-            a.status = "Stopped"
-        self.refresh_totals()
-
-    # ── корутина-приёмник сообщений от miner.py ───────────────────────────────
-    async def feeder(self):
-        while True:
-            login, kind, p = await self.queue.get()
-            r = self.row_of(login)
-            if r < 0:
-                continue
-            if kind == "status":
-                self.tbl.item(r, 2).setText(p.get("status", ""))
-                note = p.get("note")
-                if note:
-                    self.log_line(f"[{login}] {note}")
-            elif kind == "campaign":
-                # одиночная активная кампания + игра
-                self.tbl.item(r, 3).setText(p.get("camp", "") or "—")
-                self.tbl.item(r, 4).setText(p.get("game", "") or "—")
-            elif kind == "campaigns":
-                # список доступных кампаний (для диалога)
-                self.available_campaigns[login] = p.get("campaigns", [])
-                if login not in self.selected_campaigns:
-                    self.selected_campaigns[login] = [c.get("id") for c in self.available_campaigns[login]]
-                self.log_line(f"[{login}] Доступно кампаний: {len(self.available_campaigns[login])}")
-            elif kind == "channels":
-                items = p.get("channels", [])
-                self.channels[login] = items
-                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
-                self.tbl.item(r, 5).setText(txt)
-            elif kind == "switch":
-                chan = p.get("channel", "")
-                items = self.channels.get(login, [])
-                if chan:
-                    items = sorted(items, key=lambda c: c.get('name') != chan)
-                    self.channels[login] = items
-                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
-                self.tbl.item(r, 5).setText(txt)
-                if chan:
-                    self.log_line(f"[{login}] switched to {chan}")
-            elif kind == "progress":
-                self.tbl.item(r, 6).setText(f"{p.get('pct', 0):.0f}%")
-                self.tbl.item(r, 7).setText(str(p.get("remain", 0)))
-            elif kind == "claimed":
-                self.metrics["claimed"] += 1
-                self.tbl.item(r, 8).setText(p.get("at", ""))
-                self.log_line(f"[{login}] Claimed {p.get('drop', '')}")
-            elif kind == "error":
-                self.metrics["errors"] += 1
-                self.log_line(f"[{login}] ERROR: {p.get('msg', '')}")
-            self.refresh_totals()
-
-    # ── короткий «тик» asyncio-цикла, чтобы задачи выполнялись ────────────────
-    def pump(self):
-        try:
-            self.loop.run_until_complete(asyncio.sleep(0))
-        except Exception:
-            pass
