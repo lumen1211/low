@@ -2,13 +2,14 @@
 from __future__ import annotations
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QProgressBar,
-    QInputDialog, QMessageBox, QComboBox
+    QLineEdit, QComboBox, QInputDialog, QMessageBox
 )
 from PySide6.QtCore import QTimer
 
@@ -62,13 +63,27 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(root)
 
         top = QHBoxLayout()
-        self.lbl = QLabel("—"); top.addWidget(self.lbl); top.addStretch(1)
-        self.btn_check = QPushButton("Проверить GQL"); self.btn_check.clicked.connect(self.check_gql); top.addWidget(self.btn_check)
-        self.btn_onb = QPushButton("Onboarding (Playwright)"); self.btn_onb.clicked.connect(self.onboarding); top.addWidget(self.btn_onb)
-        self.btn_onb2 = QPushButton("Onboarding (WebView)"); self.btn_onb2.clicked.connect(self.onboarding_webview); top.addWidget(self.btn_onb2)
-        self.btn_campaigns = QPushButton("Campaigns…"); self.btn_campaigns.clicked.connect(self.campaign_settings); top.addWidget(self.btn_campaigns)
-        self.btn_start = QPushButton("Start All"); self.btn_start.clicked.connect(self.start_all); top.addWidget(self.btn_start)
-        self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
+        self.lbl = QLabel("—")
+        top.addWidget(self.lbl)
+        top.addStretch(1)
+        self.btn_check = QPushButton("Проверить GQL")
+        self.btn_check.clicked.connect(self.check_gql)
+        top.addWidget(self.btn_check)
+        self.btn_onb = QPushButton("Onboarding (Playwright)")
+        self.btn_onb.clicked.connect(self.onboarding)
+        top.addWidget(self.btn_onb)
+        self.btn_onb2 = QPushButton("Onboarding (WebView)")
+        self.btn_onb2.clicked.connect(self.onboarding_webview)
+        top.addWidget(self.btn_onb2)
+        self.btn_campaigns = QPushButton("Campaigns…")
+        self.btn_campaigns.clicked.connect(self.campaign_settings)
+        top.addWidget(self.btn_campaigns)
+        self.btn_start = QPushButton("Start All")
+        self.btn_start.clicked.connect(self.start_all)
+        top.addWidget(self.btn_start)
+        self.btn_stop = QPushButton("Stop All")
+        self.btn_stop.clicked.connect(self.stop_all)
+        top.addWidget(self.btn_stop)
         v.addLayout(top)
 
         # 10 колонок: последняя — Action (кнопка Start/Stop)
@@ -81,9 +96,25 @@ class MainWindow(QMainWindow):
         self.tbl.cellDoubleClicked.connect(self.cell_dbl_clicked)
         v.addWidget(self.tbl)
 
+        # фильтры и лог
+        flt = QHBoxLayout()
+        flt.addWidget(QLabel("Login:"))
+        self.filter_login = QLineEdit()
+        self.filter_login.setPlaceholderText("фильтр по логину/метке")
+        self.filter_login.textChanged.connect(self.refresh_log_display)
+        flt.addWidget(self.filter_login)
+        flt.addWidget(QLabel("Level:"))
+        self.filter_level = QComboBox()
+        self.filter_level.addItems(["ALL", "INFO", "ERROR"])
+        self.filter_level.currentTextChanged.connect(self.refresh_log_display)
+        flt.addStretch(1)
+        v.addLayout(flt)
+
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         v.addWidget(self.log)
+        self.log_entries: list[dict] = []
+        self.max_log_entries = 500
 
         self.populate()
         self.refresh_totals()
@@ -95,8 +126,10 @@ class MainWindow(QMainWindow):
         self._feeder_task = self.loop.create_task(self.feeder())
 
         # таймер: даём циклу «тикать», не блокируя Qt
-        self.timer = QTimer(self); self.timer.setInterval(50)  # ~20 FPS
-        self.timer.timeout.connect(self.pump); self.timer.start()
+        self.timer = QTimer(self)
+        self.timer.setInterval(50)  # ~20 FPS
+        self.timer.timeout.connect(self.pump)
+        self.timer.start()
 
     # ── helpers ────────────────────────────────────────────────────────────────
     def populate(self):
@@ -148,6 +181,11 @@ class MainWindow(QMainWindow):
                 a.campaign_id = cid or ""
                 a.active_campaign = name or ""
                 break
+        # прокинем выбор в майнер
+        if cid:
+            q = self.cmds.get(login)
+            if q:
+                q.put_nowait(("select_campaigns", [cid]))
 
     def _fmt_seconds(self, secs: int) -> str:
         try:
@@ -159,7 +197,28 @@ class MainWindow(QMainWindow):
         except Exception:
             return "—"
 
-    def log_line(self, s: str): self.log.append(s)
+    def log_line(self, msg: str, login: str = "", level: str = "INFO"):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_entries.append({"ts": ts, "login": login, "level": level, "msg": msg})
+        if len(self.log_entries) > self.max_log_entries:
+            self.log_entries = self.log_entries[-self.max_log_entries:]
+        self.refresh_log_display()
+
+    def refresh_log_display(self):
+        login_f = self.filter_login.text().strip().lower()
+        level_f = self.filter_level.currentText()
+        lines = []
+        for e in self.log_entries:
+            if login_f and login_f not in e["login"].lower():
+                continue
+            if level_f != "ALL" and e["level"] != level_f:
+                continue
+            color = "red" if e["level"] == "ERROR" else "black"
+            login_part = f"[{e['login']}]" if e["login"] else ""
+            lines.append(
+                f"<span style='color:{color}'>[{e['ts']}] [{e['level']}] {login_part} {e['msg']}</span>"
+            )
+        self.log.setHtml("<br>".join(lines))
 
     def refresh_totals(self):
         active = len(self.tasks)
@@ -208,7 +267,7 @@ class MainWindow(QMainWindow):
             cookie_file = Path(COOKIES_DIR) / f"{login}.json"
             if not cookie_file.exists():
                 self.tbl.item(r, 2).setText("NO COOKIES")
-                self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
+                self.log_line(f"NO COOKIES — {cookie_file} not found", login=login, level="ERROR")
                 miss += 1
                 continue
 
@@ -221,13 +280,13 @@ class MainWindow(QMainWindow):
                         break
             except Exception as e:
                 self.tbl.item(r, 2).setText("BAD COOKIES")
-                self.log_line(f"[{login}] BAD COOKIES — {e}")
+                self.log_line(f"BAD COOKIES — {e}", login=login, level="ERROR")
                 other += 1
                 continue
 
             if not token:
                 self.tbl.item(r, 2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
+                self.log_line("NO TOKEN in cookies", login=login, level="ERROR")
                 miss += 1
                 continue
 
@@ -242,19 +301,19 @@ class MainWindow(QMainWindow):
                     j = resp.json()
                     login_resp = j.get("login", "?")
                     scopes = ",".join(j.get("scopes", []))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
+                    self.log_line(f"OK — login={login_resp} scopes=[{scopes}]", login=login)
                     ok += 1
                 elif resp.status_code in (401, 403):
                     self.tbl.item(r, 2).setText("EXPIRED")
-                    self.log_line(f"[{login}] EXPIRED — token invalid")
+                    self.log_line("EXPIRED — token invalid", login=login, level="ERROR")
                     exp += 1
                 else:
                     self.tbl.item(r, 2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
+                    self.log_line(f"HTTP {resp.status_code}: {resp.text[:120]}", login=login, level="ERROR")
                     other += 1
             except Exception as e:
                 self.tbl.item(r, 2).setText("ERROR")
-                self.log_line(f"[{login}] ERROR — {e}")
+                self.log_line(f"ERROR — {e}", login=login, level="ERROR")
                 other += 1
 
         self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
@@ -264,9 +323,9 @@ class MainWindow(QMainWindow):
         result = res.get("result", "")
         note = res.get("note", "")
         if result == "STEP":
-            self.log_line(f"[{login}] {note}")
+            self.log_line(note, login=login)
         else:
-            self.log_line(f"[{login}] {result} — {note}")
+            self.log_line(f"{result} — {note}", login=login)
         if result == "DELETE":
             self._remove_account_from_ui(login)
 
@@ -295,7 +354,7 @@ class MainWindow(QMainWindow):
         login = self.tbl.item(r, 1).text()
         campaigns = self.available_campaigns.get(login, [])
         if not campaigns:
-            self.log_line(f"[{login}] Нет данных о кампаниях")
+            self.log_line("Нет данных о кампаниях", login=login)
             return
         selected = self.selected_campaigns.get(login, [c.get("id") for c in campaigns])
         dlg = CampaignSettingsDialog(campaigns, selected, self)
@@ -370,20 +429,30 @@ class MainWindow(QMainWindow):
                 self.tbl.item(r, 2).setText(p.get("status", ""))
                 note = p.get("note")
                 if note:
-                    self.log_line(f"[{login}] {note}")
+                    self.log_line(note, login=login)
             elif kind == "campaign":
                 self.tbl.item(r, 3).setText(p.get("camp", "") or "—")
                 self.tbl.item(r, 4).setText(p.get("game", "") or "—")
             elif kind == "campaigns":
-                self.available_campaigns[login] = p.get("campaigns", [])
+                # список доступных кампаний (для диалога + выпадающий список)
+                camps = p.get("campaigns", [])
+                self.available_campaigns[login] = camps
                 if login not in self.selected_campaigns:
-                    self.selected_campaigns[login] = [c.get("id") for c in self.available_campaigns[login]]
-                self.log_line(f"[{login}] Доступно кампаний: {len(self.available_campaigns[login])}")
+                    self.selected_campaigns[login] = [c.get("id") for c in camps]
+                # заполним выпадающий список в таблице
+                cmb = self.cmb_campaigns.get(login)
+                if cmb is not None:
+                    cmb.blockSignals(True)
+                    cmb.clear()
+                    for c in camps:
+                        cmb.addItem(c.get("name", c.get("id", "—")), c.get("id"))
+                    cmb.blockSignals(False)
+                self.log_line(f"Доступно кампаний: {len(camps)}", login=login)
             elif kind == "channels":
                 items = p.get("channels", [])
                 self.channels[login] = items
                 txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
-                self.tbl.item(r, 5).setText(txt)
+                self.tbl.setItem(r, 5, QTableWidgetItem(txt))
             elif kind == "switch":
                 chan = p.get("channel", "")
                 items = self.channels.get(login, [])
@@ -391,9 +460,9 @@ class MainWindow(QMainWindow):
                     items = sorted(items, key=lambda c: c.get('name') != chan)
                     self.channels[login] = items
                 txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
-                self.tbl.item(r, 5).setText(txt)
+                self.tbl.setItem(r, 5, QTableWidgetItem(txt))
                 if chan:
-                    self.log_line(f"[{login}] switched to {chan}")
+                    self.log_line(f"switched to {chan}", login=login)
             elif kind == "progress":
                 # поддерживаем и старый remain, и новый next (+ опциональный drop)
                 pb = self.tbl.cellWidget(r, 6)
@@ -417,10 +486,10 @@ class MainWindow(QMainWindow):
                     remain_secs = p.get("next", 0)
                 self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
                 self.tbl.item(r, 8).setText(p.get("at", ""))
-                self.log_line(f"[{login}] Claimed {p.get('drop', '')}")
+                self.log_line(f"Claimed {p.get('drop','')}", login=login)
             elif kind == "error":
                 self.metrics["errors"] += 1
-                self.log_line(f"[{login}] ERROR: {p.get('msg', '')}")
+                self.log_line(f"ERROR: {p.get('msg','')}", login=login, level="ERROR")
             self.refresh_totals()
 
     # ── короткий «тик» asyncio-цикла, чтобы задачи выполнялись ────────────────
