@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
 
-        # 10 колонок: добавили "Action" в конце
+        # 10 колонок: последняя — Action (кнопка Start/Stop)
         self.tbl = QTableWidget(0, 10)
         self.tbl.setHorizontalHeaderLabels([
             "Label","Login","Status","Campaign","Game","Channels",
@@ -356,11 +356,9 @@ class MainWindow(QMainWindow):
                 if note:
                     self.log_line(f"[{login}] {note}")
             elif kind == "campaign":
-                # одиночная активная кампания + игра
                 self.tbl.item(r, 3).setText(p.get("camp", "") or "—")
                 self.tbl.item(r, 4).setText(p.get("game", "") or "—")
             elif kind == "campaigns":
-                # список доступных кампаний (для диалога)
                 self.available_campaigns[login] = p.get("campaigns", [])
                 if login not in self.selected_campaigns:
                     self.selected_campaigns[login] = [c.get("id") for c in self.available_campaigns[login]]
@@ -414,3 +412,4 @@ class MainWindow(QMainWindow):
         self.loop.stop()
         self.loop.close()
         super().closeEvent(event)
+
