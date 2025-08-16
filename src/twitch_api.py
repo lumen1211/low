@@ -8,7 +8,9 @@ GQL = URL("https://gql.twitch.tv/gql")
 
 class TwitchAPI:
     def __init__(self, auth_token: str, client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko", proxy: str = ""):
-        self.auth = auth_token; self.client_id = client_id; self.proxy = proxy or None
+        self.auth = auth_token
+        self.client_id = client_id
+        self.proxy = proxy or None
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
         self.ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -36,7 +38,9 @@ class TwitchAPI:
                     "Content-Type": "application/json",
                 }) as r:
                     if r.status == 429:
-                        await asyncio.sleep(min(60, 2**attempt)); attempt += 1; continue
+                        await asyncio.sleep(min(60, 2**attempt))
+                        attempt += 1
+                        continue
                     if 200 <= r.status < 300:
                         data = await r.json()
                         if isinstance(data, list): data = data[0]
@@ -46,10 +50,31 @@ class TwitchAPI:
                     text = await r.text()
                     raise RuntimeError(f"GQL {r.status}: {text}")
             except aiohttp.ClientError:
-                await asyncio.sleep(min(60, 2**attempt)); attempt += 1
-                if attempt > 5: raise
+                await asyncio.sleep(min(60, 2**attempt))
+                attempt += 1
+                if attempt > 5:
+                    raise
 
     async def viewer_dashboard(self) -> Any: return await self.gql("ViewerDropsDashboard", {})
     async def inventory(self) -> Any: return await self.gql("Inventory", {})
     async def increment(self, channel_id: str) -> Any: return await self.gql("IncrementDropCurrentSessionProgress", {"channelID": channel_id})
     async def claim(self, drop_instance_id: str) -> Any: return await self.gql("ClaimDropReward", {"dropInstanceID": drop_instance_id})
+    async def campaign_details(self, campaign_id: str) -> Any: return await self.gql("DropsCampaignDetails", {"campaignID": campaign_id})
+
+    async def get_live_channels(self, campaign_id: str) -> list[tuple[str,int,bool]]:
+        data = await self.campaign_details(campaign_id)
+        channels: list[tuple[str,int,bool]] = []
+        try:
+            d = (data or {}).get("data") or {}
+            camp = d.get("campaign") or d.get("dropsCampaign") or {}
+            avail = camp.get("availableChannels") or camp.get("channels") or []
+            for ch in avail:
+                chan = ch.get("channel") if isinstance(ch.get("channel"), dict) else ch
+                cid = (chan or {}).get("id") or ch.get("id") or ""
+                stream = (chan or {}).get("stream") or ch.get("stream") or {}
+                live = bool(stream)
+                viewers = stream.get("viewersCount") or 0
+                channels.append((cid, viewers, live))
+        except Exception:
+            pass
+        return channels
