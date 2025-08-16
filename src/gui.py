@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QInputDialog, QMessageBox
 )
 from PySide6.QtCore import QTimer
 
@@ -48,6 +48,8 @@ class MainWindow(QMainWindow):
         # состояния/метрики
         self.tasks: dict[str, asyncio.Task] = {}
         self.stops: dict[str, asyncio.Event] = {}
+        self.cmds: dict[str, asyncio.Queue] = {}
+        self.channels: dict[str, list[dict]] = {}
         self.metrics = {"claimed": 0, "errors": 0}
 
         # ── UI ──────────────────────────────────────────────────────────────────
@@ -63,9 +65,10 @@ class MainWindow(QMainWindow):
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
 
-        self.tbl = QTableWidget(0, 8)
-        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Progress","Remain (min)","Last claim"])
+        self.tbl = QTableWidget(0, 9)
+        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Channels","Progress","Remain (min)","Last claim"])
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl.cellDoubleClicked.connect(self.cell_dbl_clicked)
         v.addWidget(self.tbl)
 
         self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
@@ -89,7 +92,7 @@ class MainWindow(QMainWindow):
         self.tbl.setRowCount(0)
         for a in self.accounts:
             r = self.tbl.rowCount(); self.tbl.insertRow(r)
-            for i, val in enumerate([a.label, a.login, a.status, "", "", "0%", "0", ""]):
+            for i, val in enumerate([a.label, a.login, a.status, "", "", "—", "0%", "0", ""]):
                 self.tbl.setItem(r, i, QTableWidgetItem(str(val)))
 
     def row_of(self, login: str) -> int:
@@ -108,6 +111,23 @@ class MainWindow(QMainWindow):
         if r >= 0: self.tbl.removeRow(r)
         self.accounts = [a for a in self.accounts if a.login != login]
         self.refresh_totals()
+
+    def cell_dbl_clicked(self, row: int, col: int):
+        if col != 5:
+            return
+        login = self.tbl.item(row,1).text()
+        items = self.channels.get(login, [])
+        if not items:
+            return
+        labels = [f"{c.get('name','')} ({c.get('viewers',0)})" for c in items]
+        names = [c.get('name','') for c in items]
+        sel, ok = QInputDialog.getItem(self, "Switch Channel", "Select channel:", labels, 0, False)
+        if ok and sel in labels:
+            idx = labels.index(sel)
+            chan = names[idx]
+            cmd_q = self.cmds.get(login)
+            if cmd_q:
+                cmd_q.put_nowait(("switch", chan))
 
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
@@ -203,7 +223,9 @@ class MainWindow(QMainWindow):
             if a.login in self.tasks: continue
             stop = asyncio.Event()
             self.stops[a.login] = stop
-            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop))
+            cmd_q = asyncio.Queue()
+            self.cmds[a.login] = cmd_q
+            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop, cmd_q))
             self.tasks[a.login] = t
             a.status = "Running"
         self.refresh_totals()
@@ -213,6 +235,7 @@ class MainWindow(QMainWindow):
             s.set()
         self.stops.clear()
         self.tasks.clear()
+        self.cmds.clear()
         for a in self.accounts:
             a.status = "Stopped"
         self.refresh_totals()
@@ -232,12 +255,27 @@ class MainWindow(QMainWindow):
             elif kind == "campaign":
                 self.tbl.item(r,3).setText(p.get("camp","") or "—")
                 self.tbl.item(r,4).setText(p.get("game","") or "—")
+            elif kind == "channels":
+                items = p.get("channels", [])
+                self.channels[login] = items
+                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                self.tbl.item(r,5).setText(txt)
+            elif kind == "switch":
+                chan = p.get("channel", "")
+                items = self.channels.get(login, [])
+                if chan:
+                    items = sorted(items, key=lambda c: c.get('name') != chan)
+                    self.channels[login] = items
+                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                self.tbl.item(r,5).setText(txt)
+                if chan:
+                    self.log_line(f"[{login}] switched to {chan}")
             elif kind == "progress":
-                self.tbl.item(r,5).setText(f"{p.get('pct',0):.0f}%")
-                self.tbl.item(r,6).setText(str(p.get("remain",0)))
+                self.tbl.item(r,6).setText(f"{p.get('pct',0):.0f}%")
+                self.tbl.item(r,7).setText(str(p.get("remain",0)))
             elif kind == "claimed":
                 self.metrics["claimed"] += 1
-                self.tbl.item(r,7).setText(p.get("at",""))
+                self.tbl.item(r,8).setText(p.get("at",""))
                 self.log_line(f"[{login}] Claimed {p.get('drop','')}")
             elif kind == "error":
                 self.metrics["errors"] += 1
