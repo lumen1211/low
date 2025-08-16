@@ -2,7 +2,7 @@ from __future__ import annotations
 import aiohttp, asyncio
 from yarl import URL
 from typing import Any, Dict, Optional
-from .ops import load_ops
+from .ops import load_ops, missing_ops
 
 GQL = URL("https://gql.twitch.tv/gql")
 
@@ -11,6 +11,11 @@ class TwitchAPI:
         self.auth = auth_token; self.client_id = client_id; self.proxy = proxy or None
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
+        miss = missing_ops(self.ops)
+        if miss:
+            raise RuntimeError(
+                f"Persisted hash for {', '.join(miss)} not set in ops/ops.json"
+            )
         self.ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     async def start(self):
