@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
                     )
                     self.tbl.setCellWidget(r, i, cmb)
                     self.cmb_campaigns[a.login] = cmb
-                elif i == 6:
+                elif i == 6:  # Progress — QProgressBar
                     pb = QProgressBar()
                     pb.setRange(0, 100)
                     pb.setValue(0)
