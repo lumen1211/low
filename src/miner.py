@@ -18,6 +18,7 @@ from .onboarding import bulk_onboarding
 from .onboarding_webview import WebOnboarding, Account as WVAccount
 from .miner import run_account  # асинхронный воркер
 from .ops import load_ops, missing_ops
+from .campaign_dialog import CampaignSettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -29,29 +30,31 @@ class MainWindow(QMainWindow):
         self.accounts_file = Path(accounts_file)
         self.accounts: list[Account] = load_accounts(self.accounts_file)
 
-        # проверяем наличие PQ-хэшей
+        # Проверяем наличие PQ-хэшей
         try:
             ops = load_ops()
             miss = missing_ops(ops)
             if miss:
                 QMessageBox.warning(
-                    self,
-                    "Missing PQ hashes",
+                    self, "Missing PQ hashes",
                     "\n".join(["Отсутствуют PQ-хэши для операций:", *miss]),
                 )
         except Exception as e:
             QMessageBox.warning(self, "OPS load error", f"Не удалось загрузить ops.json: {e}")
 
-        # состояния/метрики
+        # Состояния/метрики
         self.tasks: dict[str, asyncio.Task] = {}
         self.stops: dict[str, asyncio.Event] = {}
-        self.cmds: dict[str, asyncio.Queue] = {}
-        self.channels: dict[str, list[dict]] = {}
+        self.cmds: dict[str, asyncio.Queue] = {}          # команды в miner
+        self.channels: dict[str, list[dict]] = {}         # каналы по аккаунту
+        self.available_campaigns: dict[str, list] = {}    # доступные кампании от miner
+        self.selected_campaigns: dict[str, list] = {}     # выбранные пользователем
         self.metrics = {"claimed": 0, "errors": 0}
-        # выпадающие списки кампаний по логину
+
+        # выпадающие списки кампаний по логину (если используете)
         self.cmb_campaigns: dict[str, QComboBox] = {}
 
-        # ── UI ──────────────────────────────────────────────────────────────────
+        # ── UI ────────────────────────────────────────────────────────────────
         root = QWidget(); self.setCentralWidget(root)
         v = QVBoxLayout(root)
 
@@ -60,6 +63,7 @@ class MainWindow(QMainWindow):
         self.btn_check = QPushButton("Проверить GQL"); self.btn_check.clicked.connect(self.check_gql); top.addWidget(self.btn_check)
         self.btn_onb = QPushButton("Onboarding (Playwright)"); self.btn_onb.clicked.connect(self.onboarding); top.addWidget(self.btn_onb)
         self.btn_onb2 = QPushButton("Onboarding (WebView)"); self.btn_onb2.clicked.connect(self.onboarding_webview); top.addWidget(self.btn_onb2)
+        self.btn_campaigns = QPushButton("Campaigns…"); self.btn_campaigns.clicked.connect(self.campaign_settings); top.addWidget(self.btn_campaigns)
         self.btn_start = QPushButton("Start All"); self.btn_start.clicked.connect(self.start_all); top.addWidget(self.btn_start)
         self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
         v.addLayout(top)
@@ -76,27 +80,25 @@ class MainWindow(QMainWindow):
 
         self.populate(); self.refresh_totals()
 
-        # ── встроенный asyncio-loop ─────────────────────────────────────────────
+        # ── встроенный asyncio-loop ───────────────────────────────────────────
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.queue: asyncio.Queue = asyncio.Queue()  # канал miner -> GUI
         self._feeder_task = self.loop.create_task(self.feeder())
 
-        # таймер: даём циклу «тикать», не блокируя Qt
+        # тикер, чтобы не блокировать Qt
         self.timer = QTimer(self); self.timer.setInterval(50)
         self.timer.timeout.connect(self.pump); self.timer.start()
 
-    # ── helpers ────────────────────────────────────────────────────────────────
+    # ── helpers ───────────────────────────────────────────────────────────────
     def populate(self):
         self.tbl.setRowCount(0)
         for a in self.accounts:
             r = self.tbl.rowCount()
             self.tbl.insertRow(r)
-
-            # Колонки: Label, Login, Status, Campaign(cmb), Game, Channels, Progress, Remain, Last claim
             values = [a.label, a.login, a.status, None, "", "—", "0%", "0", ""]
             for i in range(9):
-                if i == 3:  # Campaign — выпадающий список
+                if i == 3:  # Campaign — выпадающий список (пока опционально)
                     cmb = QComboBox()
                     cmb.currentIndexChanged.connect(
                         lambda _idx, login=a.login: self._on_campaign_changed(login)
@@ -143,7 +145,7 @@ class MainWindow(QMainWindow):
         self.refresh_totals()
 
     def cell_dbl_clicked(self, row: int, col: int):
-        # двойной клик по колонке Channels — ручное переключение
+        # Двойной клик по колонке Channels — ручное переключение
         if col != 5:
             return
         login = self.tbl.item(row, 1).text()
@@ -160,7 +162,7 @@ class MainWindow(QMainWindow):
             if cmd_q:
                 cmd_q.put_nowait(("switch", chan))
 
-    # ── actions ────────────────────────────────────────────────────────────────
+    # ── actions ───────────────────────────────────────────────────────────────
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
         ok = exp = miss = other = 0
@@ -182,31 +184,4 @@ class MainWindow(QMainWindow):
                 data = json.loads(cookie_file.read_text(encoding="utf-8"))
                 for c in data:
                     if c.get("name") == "auth-token":
-                        token = c.get("value") or ""
-                        break
-            except Exception as e:
-                self.tbl.item(r, 2).setText("BAD COOKIES")
-                self.log_line(f"[{login}] BAD COOKIES — {e}")
-                other += 1
-                continue
-
-            if not token:
-                self.tbl.item(r, 2).setText("NO TOKEN")
-                self.log_line(f"[{login}] NO TOKEN in cookies")
-                miss += 1
-                continue
-
-            try:
-                resp = requests.get(
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {token}"},
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    self.tbl.item(r, 2).setText("OK")
-                    j = resp.json()
-                    login_resp = j.get("login", "?")
-                    scopes = ",".join(j.get("scopes", []))
-                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
-                    ok += 1
-                elif resp.status_code_
+                        token = c.get("value"
