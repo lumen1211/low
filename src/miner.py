@@ -1,191 +1,175 @@
 # src/miner.py
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 import asyncio
-import json
-from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import aiohttp
+from .accounts import auth_token_from_cookies
+from .twitch_api import TwitchAPI
 
-GQL_URL = "https://gql.twitch.tv/gql"
-CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
-# PersistedQuery хэши (стабильные для веб-клиента Twitch; время от времени меняются, тогда обновим)
-PQ = {
-    "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
-}
-
-async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
-    fp = cookies_dir / f"{login}.json"
-    if not fp.exists():
-        return None
+async def _safe_put(queue: asyncio.Queue, payload: Tuple[str, str, Dict[str, Any]]):
+    """Кладём сообщение в GUI-очередь, не роняя воркер из-за случайной ошибки."""
     try:
-        data = json.loads(fp.read_text(encoding="utf-8"))
-        for c in data:
-            if c.get("name") == "auth-token":
-                return c.get("value") or ""
+        await queue.put(payload)
     except Exception:
-        return None
-    return None
-
-async def _gql(session: aiohttp.ClientSession, op_name: str, variables: Dict[str, Any]) -> Any:
-    body = {
-        "operationName": op_name,
-        "variables": variables,
-        "extensions": {
-            "persistedQuery": {"version": 1, "sha256Hash": PQ[op_name]}
-        },
-    }
-    async with session.post(GQL_URL, json=body) as r:
-        if r.status != 200:
-            raise RuntimeError(f"GQL HTTP {r.status}")
-        return await r.json()
-
-async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
-    """Минимальный дашборд дропсов для текущего пользователя."""
-    return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
+        pass
 
 
-def _extract_campaigns(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Вытащить список кампаний (id, name, game, raw)."""
-    d = (data or {}).get("data") or {}
-    vd = d.get("viewer") or d.get("currentUser") or {}
-    drops = vd.get("dropsDashboard") or vd.get("drops") or vd
-    campaigns: List[Dict[str, Any]] = []
-    if isinstance(drops, dict):
-        for key in ("currentCampaigns", "availableCampaigns", "campaigns"):
-            if isinstance(drops.get(key), list):
-                campaigns = drops[key]
-                break
+def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
+    """
+    Выдёргиваем список кампаний из ответа ViewerDropsDashboard.
+    Возвращаем список словарей: {id, name, game, channels(str[])}.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        d = (data or {}).get("data") or {}
+        vd = d.get("viewer") or d.get("currentUser") or {}
+        drops = vd.get("dropsDashboard") or vd.get("drops") or vd
 
-    result: List[Dict[str, Any]] = []
-    for c in campaigns:
-        cid = c.get("id") or ""
-        name = c.get("name") or c.get("displayName") or cid
-        game_obj = c.get("game") or c.get("gameTitle") or {}
-        game_name = game_obj.get("name") or game_obj.get("displayName") or ""
-        result.append({"id": cid, "name": name, "game": game_name, "raw": c})
-    return result
+        raw_camps = []
+        if isinstance(drops, dict):
+            if isinstance(drops.get("currentCampaigns"), list):
+                raw_camps = drops["currentCampaigns"]
+            elif isinstance(drops.get("availableCampaigns"), list):
+                raw_camps = drops["availableCampaigns"]
+            elif isinstance(drops.get("campaigns"), list):
+                raw_camps = drops["campaigns"]
+
+        for c in raw_camps or []:
+            cid = c.get("id") or c.get("campaignID") or c.get("campaignId") or ""
+            cname = c.get("name") or c.get("displayName") or cid
+            game = c.get("game") or c.get("gameTitle") or {}
+            gname = (game.get("name") or game.get("displayName") or "") or "—"
+
+            channels: List[str] = []
+            for ck in ("allowlistedChannels", "allowList", "allowedChannels", "channels"):
+                if isinstance(c.get(ck), list):
+                    for ch in c[ck]:
+                        nm = (
+                            ch.get("name")
+                            or ch.get("displayName")
+                            or ch.get("login")
+                            or ch.get("channelLogin")
+                            or ""
+                        )
+                        if nm:
+                            channels.append(nm)
+                    if channels:
+                        break
+
+            out.append({"id": cid, "name": cname, "game": gname, "channels": channels})
+    except Exception:
+        pass
+    return out
 
 
-def _calc_progress(camp: Optional[Dict[str, Any]]) -> Tuple[float, int]:
-    """Грубая оценка прогресса кампании (pct, remain_min)."""
-    if not isinstance(camp, dict):
-        return 0.0, 0
-    drops = camp.get("timeBasedDrops") or camp.get("drops") or []
-    for drop in drops:
-        self_data = drop.get("self") or drop.get("currentSession") or {}
-        cur = (
-            self_data.get("currentMinutesWatched")
-            or self_data.get("currentProgressMin")
-            or drop.get("currentProgressMin")
-            or 0
-        )
-        req = (
-            drop.get("requiredMinutesWatched")
-            or drop.get("requiredProgressMin")
-            or self_data.get("requiredMinutesWatched")
-            or self_data.get("requiredProgressMin")
-            or 0
-        )
-        if req and cur < req:
-            pct = cur / req * 100
-            remain = int(req - cur)
-            return pct, remain
-    return 100.0, 0
-
-
-async def fetch_campaigns(login: str, proxy: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Запросить активные кампании для аккаунта."""
-    cookies_dir = Path("cookies")
-    token = await _read_auth_token(cookies_dir, login)
-    if not token:
+async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, Any]]:
+    """
+    Получаем живые каналы по кампании через DropsCampaignDetails.
+    Возвращаем список словарей: {name, viewers, live}.
+    """
+    try:
+        chans = await api.get_live_channels(campaign_id)  # List[tuple[id_or_login, viewers, live]]
+        chans.sort(key=lambda x: x[1], reverse=True)
+        items: List[Dict[str, Any]] = []
+        for cid_or_login, viewers, live in chans:
+            items.append(
+                {"name": str(cid_or_login) or "unknown", "viewers": int(viewers or 0), "live": bool(live)}
+            )
+        return items
+    except Exception:
         return []
 
-    headers = {
-        "Client-Id": CLIENT_ID,
-        "Authorization": f"OAuth {token}",
-        "Content-Type": "application/json",
-        "Origin": "https://www.twitch.tv",
-        "Referer": "https://www.twitch.tv/",
-    }
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            data = await _discover_campaign(session)
-            return _extract_campaigns(data)
-        except Exception:
-            return []
 
 async def run_account(
     login: str,
     proxy: Optional[str],
-    queue,
+    queue: asyncio.Queue,
     stop_evt: asyncio.Event,
-    campaign_id: Optional[str] = None,
+    cmd_q: Optional[asyncio.Queue] = None,
 ):
     """
-    Мониторинг выбранной кампании:
-    - читает cookies/<login>.json -> auth-token
-    - вызывает ViewerDropsDashboard PQ
-    - обновляет GUI: Status/Campaign/Game/Progress
+    Воркер для одного аккаунта:
+      1) читает cookies/<login>.json -> auth-token
+      2) запрашивает ViewerDropsDashboard и публикует список кампаний
+      3) публикует активную кампанию и список каналов по ней (если удаётся)
+      4) ждёт команды из cmd_q: 'select_campaigns', 'switch'
     """
-    cookies_dir = Path("cookies")
-    token = await _read_auth_token(cookies_dir, login)
+    await _safe_put(queue, (login, "status", {"status": "Starting", "note": "Init worker"}))
+
+    token = auth_token_from_cookies(login)
     if not token:
-        await queue.put((login, "error", {"msg": "no cookies/auth-token"}))
+        await _safe_put(queue, (login, "error", {"msg": "no cookies/auth-token"}))
+        await _safe_put(queue, (login, "status", {"status": "Stopped"}))
         return
 
-    headers = {
-        "Client-Id": CLIENT_ID,
-        "Authorization": f"OAuth {token}",
-        "Content-Type": "application/json",
-        "Origin": "https://www.twitch.tv",
-        "Referer": "https://www.twitch.tv/",
-    }
+    api = TwitchAPI(token, proxy=proxy or "")
+    await api.start()
+    await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
+    try:
+        # 1) дашборд дропсов
+        dashboard = await api.viewer_dashboard()
+        campaigns = _parse_campaigns_from_dashboard(dashboard)
+        await _safe_put(queue, (login, "campaigns", {"campaigns": campaigns}))
+
+        # выберем первую как активную по умолчанию
+        active_ids: List[str] = [campaigns[0]["id"]] if campaigns else []
+        if campaigns:
+            first = campaigns[0]
+            await _safe_put(
+                queue,
+                (login, "campaign", {"camp": first["name"], "game": first["game"]}),
+            )
+
+            # 2) попробовать получить живые каналы детальнее
+            ch_items = await _initial_channels(api, first["id"])
+            if not ch_items and first.get("channels"):
+                ch_items = [{"name": n, "viewers": 0, "live": False} for n in first["channels"]]
+            await _safe_put(queue, (login, "channels", {"channels": ch_items}))
+
+        await _safe_put(queue, (login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
+
+        # 3) цикл ожидания команд/останова
+        while not stop_evt.is_set():
+            try:
+                if cmd_q is None:
+                    await asyncio.wait_for(asyncio.sleep(0.8), timeout=0.8)
+                    continue
+                cmd, arg = await asyncio.wait_for(cmd_q.get(), timeout=0.8)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                await _safe_put(queue, (login, "error", {"msg": f"cmd_q error: {e}"}))
+                continue
+
+            if cmd == "select_campaigns":
+                if isinstance(arg, list):
+                    ids = [cid for cid in arg if any(c["id"] == cid for c in campaigns)]
+                    if ids:
+                        active_ids = ids
+                        info = next((c for c in campaigns if c["id"] == active_ids[0]), None)
+                        if info:
+                            await _safe_put(
+                                queue,
+                                (login, "campaign", {"camp": info["name"], "game": info["game"]}),
+                            )
+                            ch_items = await _initial_channels(api, info["id"])
+                            if not ch_items and info.get("channels"):
+                                ch_items = [{"name": n, "viewers": 0, "live": False} for n in info["channels"]]
+                            await _safe_put(queue, (login, "channels", {"channels": ch_items}))
+
+            elif cmd == "switch":
+                # GUI подсветит выбранный канал
+                await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
+
+        await _safe_put(queue, (login, "status", {"status": "Stopped"}))
+
+    except Exception as e:
+        await _safe_put(queue, (login, "error", {"msg": f"GQL error: {e}"}))
+        await _safe_put(queue, (login, "status", {"status": "Stopped"}))
+    finally:
         try:
-            data = await _discover_campaign(session)
-            campaigns = _extract_campaigns(data)
-            camp = None
-            if campaign_id:
-                for c in campaigns:
-                    if c["id"] == campaign_id:
-                        camp = c
-                        break
-            if camp is None and campaigns:
-                camp = campaigns[0]
-
-            camp_name = camp.get("name") if camp else ""
-            game_name = camp.get("game") if camp else ""
-
-            await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
-            pct, remain = _calc_progress(camp)
-            await queue.put((login, "progress", {"pct": pct, "remain": remain}))
-            await queue.put((login, "status", {"status": "Ready", "note": "Campaign monitoring"}))
-
-            # Периодически обновляем прогресс кампании
-            while not stop_evt.is_set():
-                await asyncio.sleep(60.0)
-                try:
-                    data = await _discover_campaign(session)
-                    campaigns = _extract_campaigns(data)
-                    if campaign_id:
-                        for c in campaigns:
-                            if c["id"] == campaign_id:
-                                camp = c
-                                break
-                    else:
-                        camp = campaigns[0] if campaigns else None
-                    pct, remain = _calc_progress(camp)
-                    await queue.put((login, "progress", {"pct": pct, "remain": remain}))
-                except Exception:
-                    pass
-
-            await queue.put((login, "status", {"status": "Stopped"}))
-
-        except Exception as e:
-            await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+            await api.close()
+        except Exception:
+            pass
