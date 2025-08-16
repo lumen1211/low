@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QInputDialog
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QInputDialog, QMessageBox
 )
 from PySide6.QtCore import QTimer
 
@@ -27,6 +27,23 @@ class MainWindow(QMainWindow):
 
         self.accounts_file = Path(accounts_file)
         self.accounts: list[Account] = load_accounts(self.accounts_file)
+
+        # проверяем наличие PQ-хэшей
+        try:
+            ops = load_ops()
+            miss = missing_ops(ops)
+            if miss:
+                QMessageBox.warning(
+                    self,
+                    "Missing PQ hashes",
+                    "\n".join(["Отсутствуют PQ-хэши для операций:", *miss]),
+                )
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "OPS load error",
+                f"Не удалось загрузить ops.json: {e}",
+            )
 
         # состояния/метрики
         self.tasks: dict[str, asyncio.Task] = {}
