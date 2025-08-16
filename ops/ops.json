@@ -1,6 +1,6 @@
 {
-  "ViewerDropsDashboard": "actual_hash_from_browser_devtools",
-  "Inventory": "actual_hash_from_browser_devtools",
-  "IncrementDropCurrentSessionProgress": "actual_hash_from_browser_devtools",
-  "ClaimDropReward": "actual_hash_from_browser_devtools"
+  "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
+  "Inventory": "056d186dab99a9d48118e27cc4e1396de713560633ae9bc9e21a06ff4685b0a9",
+  "IncrementDropCurrentSessionProgress": "eb3d89a18f47196ecc9776749811174e13a5abf41a0bccca44a0be37c89f23dc",
+  "ClaimDropReward": "51c94d4efdfa04b6a1f19e4c5b8d794b15eec2f1cd5f3f792f3fed2560b352c0"
 }
