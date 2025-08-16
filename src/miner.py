@@ -1,194 +1,348 @@
-# src/miner.py
-# -*- coding: utf-8 -*-
+# src/gui.py
 from __future__ import annotations
-import asyncio
-import json
+import asyncio, json
 from pathlib import Path
-from typing import Optional, Dict, Any, List
 
-import aiohttp
+import requests
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit,
+    QInputDialog, QMessageBox, QComboBox
+)
+from PySide6.QtCore import QTimer
 
-GQL_URL = "https://gql.twitch.tv/gql"
-CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+# локальные модули
+from .types import Account
+from .accounts import load_accounts, COOKIES_DIR
+from .onboarding import bulk_onboarding
+from .onboarding_webview import WebOnboarding, Account as WVAccount
+from .miner import run_account  # <- асинхронный воркер (aiohttp/TwitchAPI)
+from .ops import load_ops, missing_ops
 
-# PersistedQuery хэши (стабильные для веб-клиента Twitch; время от времени меняются, тогда обновим)
-PQ = {
-    "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
-}
 
-async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
-    fp = cookies_dir / f"{login}.json"
-    if not fp.exists():
-        return None
-    try:
-        data = json.loads(fp.read_text(encoding="utf-8"))
-        for c in data:
-            if c.get("name") == "auth-token":
-                return c.get("value") or ""
-    except Exception:
-        return None
-    return None
+class MainWindow(QMainWindow):
+    def __init__(self, accounts_file: Path):
+        super().__init__()
+        self.setWindowTitle("Twitch Drops — API Miner (TXT/CSV)")
+        self.resize(1100, 700)
 
-async def _gql(session: aiohttp.ClientSession, op_name: str, variables: Dict[str, Any]) -> Any:
-    body = {
-        "operationName": op_name,
-        "variables": variables,
-        "extensions": {
-            "persistedQuery": {"version": 1, "sha256Hash": PQ[op_name]}
-        },
-    }
-    async with session.post(GQL_URL, json=body) as r:
-        if r.status != 200:
-            raise RuntimeError(f"GQL HTTP {r.status}")
-        return await r.json()
+        self.accounts_file = Path(accounts_file)
+        self.accounts: list[Account] = load_accounts(self.accounts_file)
 
-async def _discover_campaign(session: aiohttp.ClientSession) -> Dict[str, Any]:
-    # минимальный дашборд дропсов для текущего пользователя
-    return await _gql(session, "ViewerDropsDashboard", {"isLoggedIn": True})
-
-def _extract_campaigns(drops: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Извлекаем список кампаний из ответа Twitch."""
-    campaigns: List[Dict[str, str]] = []
-    lst: List[Dict[str, Any]] = []
-    if isinstance(drops.get("currentCampaigns"), list):
-        lst = drops["currentCampaigns"]
-    elif isinstance(drops.get("availableCampaigns"), list):
-        lst = drops["availableCampaigns"]
-    elif isinstance(drops.get("campaigns"), list):
-        lst = drops["campaigns"]
-
-    for c in lst:
-        game = c.get("game") or c.get("gameTitle") or {}
-        campaigns.append({
-            "id": c.get("id", ""),
-            "name": c.get("name") or c.get("displayName") or c.get("id", ""),
-            "game": game.get("name") or game.get("displayName") or "",
-        })
-    return campaigns
-
-def _find_campaign(drops: Dict[str, Any], cid: str) -> Optional[Dict[str, Any]]:
-    """Возвращает объект кампании по ID."""
-    for key in ("currentCampaigns", "availableCampaigns", "campaigns"):
-        lst = drops.get(key)
-        if isinstance(lst, list):
-            for c in lst:
-                if c.get("id") == cid:
-                    return c
-    return None
-
-def _campaign_progress(camp: Dict[str, Any]) -> tuple[float, int]:
-    """Пытаемся вычислить прогресс кампании в минутах."""
-    drops = camp.get("timeBasedDrops") or camp.get("timebasedDrops") or camp.get("drops") or []
-    for d in drops:
-        cur = (
-            (d.get("self") or {}).get("currentMinutesWatched")
-            or d.get("currentMinutesWatched")
-            or 0
-        )
-        req = (
-            (d.get("self") or {}).get("requiredMinutesWatched")
-            or d.get("requiredMinutesWatched")
-            or 0
-        )
-        if req:
-            pct = min(cur / req, 1.0) * 100.0
-            remain = max(req - cur, 0)
-            return pct, int(remain)
-    return 0.0, 0
-
-async def run_account(
-    login: str,
-    proxy: Optional[str],
-    queue,
-    stop_evt: asyncio.Event,
-    campaign_id: Optional[str] = None,
-):
-    """
-    Шаг 2a: без видео. GQL-дискавери кампаний для аккаунта и трекинг прогресса.
-    - читает cookies/<login>.json -> auth-token
-    - вызывает ViewerDropsDashboard PQ
-    - обновляет GUI: Status/Campaign/Game
-    """
-    cookies_dir = Path("cookies")
-    token = await _read_auth_token(cookies_dir, login)
-    if not token:
-        await queue.put((login, "error", {"msg": "no cookies/auth-token"}))
-        return
-
-    headers = {
-        "Client-Id": CLIENT_ID,
-        "Authorization": f"OAuth {token}",
-        "Content-Type": "application/json",
-        "Origin": "https://www.twitch.tv",
-        "Referer": "https://www.twitch.tv/",
-    }
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
+        # проверяем наличие PQ-хэшей
         try:
-            data = await _discover_campaign(session)
-
-            # Вытаскиваем список кампаний
-            camp_list: List[Dict[str, str]] = []
-            try:
-                d = (data or {}).get("data") or {}
-                vd = d.get("viewer") or d.get("currentUser") or {}
-                drops = vd.get("dropsDashboard") or vd.get("drops") or vd
-                if isinstance(drops, dict):
-                    camp_list = _extract_campaigns(drops)
-                await queue.put(
-                    (login, "campaigns", {"list": [(c["id"], c["name"]) for c in camp_list]})
+            ops = load_ops()
+            miss = missing_ops(ops)
+            if miss:
+                QMessageBox.warning(
+                    self,
+                    "Missing PQ hashes",
+                    "\n".join(["Отсутствуют PQ-хэши для операций:", *miss]),
                 )
-            except Exception:
-                pass
-
-            if campaign_id:
-                # найдём выбранную кампанию
-                selected = None
-                for c in camp_list:
-                    if c["id"] == campaign_id:
-                        selected = c
-                        break
-                if not selected and camp_list:
-                    selected = camp_list[0]
-                    campaign_id = selected["id"]
-                if selected:
-                    await queue.put(
-                        (
-                            login,
-                            "campaign",
-                            {
-                                "id": campaign_id,
-                                "camp": selected["name"],
-                                "game": selected["game"],
-                            },
-                        )
-                    )
-                await queue.put(
-                    (login, "status", {"status": "Running", "note": "Tracking campaign"})
-                )
-                # цикл обновления прогресса
-                while not stop_evt.is_set():
-                    try:
-                        data = await _discover_campaign(session)
-                        d = (data or {}).get("data") or {}
-                        vd = d.get("viewer") or d.get("currentUser") or {}
-                        drops = vd.get("dropsDashboard") or vd.get("drops") or vd
-                        camp_obj = _find_campaign(drops, campaign_id)
-                        if camp_obj:
-                            pct, remain = _campaign_progress(camp_obj)
-                            await queue.put(
-                                (login, "progress", {"pct": pct, "remain": remain})
-                            )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(30.0)
-
-                await queue.put((login, "status", {"status": "Stopped"}))
-            else:
-                await queue.put(
-                    (login, "status", {"status": "Ready", "note": "Campaigns discovered"})
-                )
-
         except Exception as e:
-            await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
+            QMessageBox.warning(
+                self,
+                "OPS load error",
+                f"Не удалось загрузить ops.json: {e}",
+            )
+
+        # состояния/метрики
+        self.tasks: dict[str, asyncio.Task] = {}
+        self.stops: dict[str, asyncio.Event] = {}
+        self.cmds: dict[str, asyncio.Queue] = {}
+        self.channels: dict[str, list[dict]] = {}
+        self.metrics = {"claimed": 0, "errors": 0}
+        # выпадающие списки кампаний по логину
+        self.cmb_campaigns: dict[str, QComboBox] = {}
+
+        # ── UI ──────────────────────────────────────────────────────────────────
+        root = QWidget(); self.setCentralWidget(root)
+        v = QVBoxLayout(root)
+
+        top = QHBoxLayout()
+        self.lbl = QLabel("—"); top.addWidget(self.lbl); top.addStretch(1)
+        self.btn_check = QPushButton("Проверить GQL"); self.btn_check.clicked.connect(self.check_gql); top.addWidget(self.btn_check)
+        self.btn_onb = QPushButton("Onboarding (Playwright)"); self.btn_onb.clicked.connect(self.onboarding); top.addWidget(self.btn_onb)
+        self.btn_onb2 = QPushButton("Onboarding (WebView)"); self.btn_onb2.clicked.connect(self.onboarding_webview); top.addWidget(self.btn_onb2)
+        self.btn_start = QPushButton("Start All"); self.btn_start.clicked.connect(self.start_all); top.addWidget(self.btn_start)
+        self.btn_stop = QPushButton("Stop All"); self.btn_stop.clicked.connect(self.stop_all); top.addWidget(self.btn_stop)
+        v.addLayout(top)
+
+        self.tbl = QTableWidget(0, 9)
+        self.tbl.setHorizontalHeaderLabels(["Label","Login","Status","Campaign","Game","Channels","Progress","Remain (min)","Last claim"])
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl.cellDoubleClicked.connect(self.cell_dbl_clicked)
+        v.addWidget(self.tbl)
+
+        self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
+
+        self.populate(); self.refresh_totals()
+
+        # ── встроенный asyncio-loop ─────────────────────────────────────────────
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.queue: asyncio.Queue = asyncio.Queue()  # канал miner -> GUI
+        self._feeder_task = self.loop.create_task(self.feeder())
+
+        # таймер вызывает короткий прогон цикла, чтобы не блокировать Qt
+        self.timer = QTimer(self); self.timer.setInterval(50)  # ~20 FPS
+        self.timer.timeout.connect(self.pump); self.timer.start()
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+    def populate(self):
+        self.tbl.setRowCount(0)
+        for a in self.accounts:
+            r = self.tbl.rowCount()
+            self.tbl.insertRow(r)
+
+            # Колонки: Label, Login, Status, Campaign(cmb), Game, Channels, Progress, Remain, Last claim
+            values = [a.label, a.login, a.status, None, "", "—", "0%", "0", ""]
+            for i in range(9):
+                if i == 3:  # Campaign — выпадающий список
+                    cmb = QComboBox()
+                    cmb.currentIndexChanged.connect(
+                        lambda _idx, login=a.login: self._on_campaign_changed(login)
+                    )
+                    self.tbl.setCellWidget(r, i, cmb)
+                    self.cmb_campaigns[a.login] = cmb
+                else:
+                    self.tbl.setItem(r, i, QTableWidgetItem(str(values[i])))
+
+    def row_of(self, login: str) -> int:
+        for r in range(self.tbl.rowCount()):
+            if self.tbl.item(r, 1).text() == login:
+                return r
+        return -1
+
+    def _on_campaign_changed(self, login: str):
+        cmb = self.cmb_campaigns.get(login)
+        if not cmb:
+            return
+        idx = cmb.currentIndex()
+        cid = cmb.itemData(idx)
+        name = cmb.currentText()
+        for a in self.accounts:
+            if a.login == login:
+                a.campaign_id = cid or ""
+                a.active_campaign = name or ""
+                break
+
+    def log_line(self, s: str): self.log.append(s)
+
+    def refresh_totals(self):
+        active = sum(1 for a in self.accounts if a.status == "Running")
+        self.lbl.setText(
+            f"Аккаунтов: {len(self.accounts)} • Активных: {active} • "
+            f"Клеймов: {self.metrics['claimed']} • Ошибок: {self.metrics['errors']}"
+        )
+
+    def _remove_account_from_ui(self, login: str):
+        r = self.row_of(login)
+        if r >= 0:
+            self.tbl.removeRow(r)
+        self.accounts = [a for a in self.accounts if a.login != login]
+        self.cmb_campaigns.pop(login, None)
+        self.refresh_totals()
+
+    def cell_dbl_clicked(self, row: int, col: int):
+        # двойной клик по колонке Channels — ручное переключение
+        if col != 5:
+            return
+        login = self.tbl.item(row, 1).text()
+        items = self.channels.get(login, [])
+        if not items:
+            return
+        labels = [f"{c.get('name','')} ({c.get('viewers',0)})" for c in items]
+        names = [c.get('name','') for c in items]
+        sel, ok = QInputDialog.getItem(self, "Switch Channel", "Select channel:", labels, 0, False)
+        if ok and sel in labels:
+            idx = labels.index(sel)
+            chan = names[idx]
+            cmd_q = self.cmds.get(login)
+            if cmd_q:
+                cmd_q.put_nowait(("switch", chan))
+
+    # ── actions ────────────────────────────────────────────────────────────────
+    def check_gql(self):
+        """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
+        ok = exp = miss = other = 0
+        for a in self.accounts:
+            login = a.login
+            r = self.row_of(login)
+            if r < 0:
+                continue
+
+            cookie_file = Path(COOKIES_DIR) / f"{login}.json"
+            if not cookie_file.exists():
+                self.tbl.item(r, 2).setText("NO COOKIES")
+                self.log_line(f"[{login}] NO COOKIES — {cookie_file} not found")
+                miss += 1
+                continue
+
+            token = ""
+            try:
+                data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                for c in data:
+                    if c.get("name") == "auth-token":
+                        token = c.get("value") or ""
+                        break
+            except Exception as e:
+                self.tbl.item(r, 2).setText("BAD COOKIES")
+                self.log_line(f"[{login}] BAD COOKIES — {e}")
+                other += 1
+                continue
+
+            if not token:
+                self.tbl.item(r, 2).setText("NO TOKEN")
+                self.log_line(f"[{login}] NO TOKEN in cookies")
+                miss += 1
+                continue
+
+            try:
+                resp = requests.get(
+                    "https://id.twitch.tv/oauth2/validate",
+                    headers={"Authorization": f"OAuth {token}"},
+                    timeout=6,
+                )
+                if resp.status_code == 200:
+                    self.tbl.item(r, 2).setText("OK")
+                    j = resp.json()
+                    login_resp = j.get("login", "?")
+                    scopes = ",".join(j.get("scopes", []))
+                    self.log_line(f"[{login}] OK — login={login_resp} scopes=[{scopes}]")
+                    ok += 1
+                elif resp.status_code in (401, 403):
+                    self.tbl.item(r, 2).setText("EXPIRED")
+                    self.log_line(f"[{login}] EXPIRED — token invalid")
+                    exp += 1
+                else:
+                    self.tbl.item(r, 2).setText(f"HTTP {resp.status_code}")
+                    self.log_line(f"[{login}] HTTP {resp.status_code}: {resp.text[:120]}")
+                    other += 1
+            except Exception as e:
+                self.tbl.item(r, 2).setText("ERROR")
+                self.log_line(f"[{login}] ERROR — {e}")
+                other += 1
+
+        self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
+
+    def _on_onboarding_progress(self, res: dict):
+        login = res.get("login", "?")
+        result = res.get("result", "")
+        note = res.get("note", "")
+        if result == "STEP":
+            self.log_line(f"[{login}] {note}")
+        else:
+            self.log_line(f"[{login}] {result} — {note}")
+        if result == "DELETE":
+            self._remove_account_from_ui(login)
+
+    def onboarding(self):
+        rows = [(a.login, a.password or "", a.totp_secret or "") for a in self.accounts]
+        self.log_line(f"Onboarding: запускаю, всего аккаунтов: {len(rows)}")
+        bulk_onboarding(
+            rows,
+            out_dir=COOKIES_DIR,
+            timeout_s=180,
+            progress_cb=self._on_onboarding_progress,
+            accounts_file=self.accounts_file,
+        )
+
+    def onboarding_webview(self):
+        accs = [WVAccount(label=a.label, login=a.login, password=a.password or "") for a in self.accounts]
+        dlg = WebOnboarding(cookies_dir=Path("cookies"), accounts=accs, per_acc_timeout_sec=120, parent=self)
+        dlg.exec()
+        self.log_line("Onboarding (WebView) завершён; cookies сохранены.")
+
+    def start_all(self):
+        # очищаем завершённые задачи
+        for login, t in list(self.tasks.items()):
+            if t.done():
+                self.tasks.pop(login, None)
+        # создаём/пересоздаём задачи в нашем asyncio-цикле
+        for a in self.accounts:
+            if a.login in self.tasks:
+                continue
+            stop = asyncio.Event()
+            self.stops[a.login] = stop
+
+            # очередь команд для ручного переключения каналов
+            cmd_q = asyncio.Queue()
+            self.cmds[a.login] = cmd_q
+
+            # запускаем майнер
+            t = self.loop.create_task(run_account(a.login, a.proxy, self.queue, stop, cmd_q))
+            self.tasks[a.login] = t
+            a.status = "Running"
+        self.refresh_totals()
+
+    def stop_all(self):
+        for s in self.stops.values():
+            s.set()
+        self.stops.clear()
+        self.tasks.clear()
+        self.cmds.clear()
+        for a in self.accounts:
+            a.status = "Stopped"
+        self.refresh_totals()
+
+    # ── корутина-приёмник сообщений от miner.py ───────────────────────────────
+    async def feeder(self):
+        while True:
+            login, kind, p = await self.queue.get()
+            r = self.row_of(login)
+            if r < 0:
+                continue
+            if kind == "status":
+                self.tbl.item(r, 2).setText(p.get("status", ""))
+                note = p.get("note")
+                if note:
+                    self.log_line(f"[{login}] {note}")
+            elif kind == "campaigns":
+                cmb = self.cmb_campaigns.get(login)
+                if cmb:
+                    cmb.clear()
+                    for cid, name in p.get("list", []):
+                        cmb.addItem(name, cid)
+            elif kind == "campaign":
+                cmb = self.cmb_campaigns.get(login)
+                if cmb:
+                    cid = p.get("id")
+                    if cid is not None:
+                        idx = cmb.findData(cid)
+                        if idx >= 0:
+                            cmb.setCurrentIndex(idx)
+                self.tbl.item(r, 4).setText(p.get("game", "") or "—")
+            elif kind == "channels":
+                items = p.get("channels", [])
+                self.channels[login] = items
+                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                self.tbl.item(r, 5).setText(txt)
+            elif kind == "switch":
+                chan = p.get("channel", "")
+                items = self.channels.get(login, [])
+                if chan:
+                    items = sorted(items, key=lambda c: c.get('name') != chan)
+                    self.channels[login] = items
+                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                self.tbl.item(r, 5).setText(txt)
+                if chan:
+                    self.log_line(f"[{login}] switched to {chan}")
+            elif kind == "progress":
+                self.tbl.item(r, 6).setText(f"{p.get('pct', 0):.0f}%")
+                self.tbl.item(r, 7).setText(str(p.get("remain", 0)))
+            elif kind == "claimed":
+                self.metrics["claimed"] += 1
+                self.tbl.item(r, 8).setText(p.get("at", ""))
+                self.log_line(f"[{login}] Claimed {p.get('drop', '')}")
+            elif kind == "error":
+                self.metrics["errors"] += 1
+                self.log_line(f"[{login}] ERROR: {p.get('msg', '')}")
+            self.refresh_totals()
+
+    # ── короткий «тик» asyncio-цикла, чтобы задачи выполнялись ────────────────
+    def pump(self):
+        try:
+            self.loop.run_until_complete(asyncio.sleep(0))
+        except Exception:
+            pass
