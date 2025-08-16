@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any
 import json
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QUrl, QTimer, QObject, Signal
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineScript, QWebEnginePage
+from PySide6.QtNetwork import QNetworkProxy
 
 LOGIN_URL = "https://www.twitch.tv/login"
 UA_CHROME = (
@@ -93,6 +95,15 @@ class WebOnboarding(QDialog):
         self._next()
 
     # ---------- scripts ----------
+    def _set_proxy(self, proxy: str) -> None:
+        if not proxy:
+            self.profile.setHttpProxy(QNetworkProxy(QNetworkProxy.NoProxy))
+            return
+        u = urlparse(proxy)
+        ptype = QNetworkProxy.Socks5Proxy if u.scheme.startswith("socks") else QNetworkProxy.HttpProxy
+        qnp = QNetworkProxy(ptype, u.hostname or "", u.port or 0, u.username or "", u.password or "")
+        self.profile.setHttpProxy(qnp)
+
     def _install_scripts(self, login: str, password: str) -> None:
         # Полностью очищаем коллекцию и вставляем два скрипта (scaffold + autofill)
         coll = self.page.scripts()
@@ -193,7 +204,7 @@ class WebOnboarding(QDialog):
             self.profile.clearHttpCache()
         except Exception:
             pass
-
+        self._set_proxy(acc.proxy)
         self._install_scripts(acc.login, acc.password)
         self.timer.start(self.timeout_ms)
         self.view.setUrl(QUrl(LOGIN_URL))
