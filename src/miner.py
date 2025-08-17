@@ -112,14 +112,13 @@ async def run_account(
     await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
 
     try:
-        # 1) Дашборд дропсов → список кампаний
+        # 1) дашборд дропсов
         dashboard = await api.viewer_dashboard()
         campaigns = _parse_campaigns_from_dashboard(dashboard)
         await _safe_put(queue, (login, "campaigns", {"campaigns": campaigns}))
 
-        # По умолчанию выберем первую кампанию, если она есть
+        # выберем первую как активную по умолчанию
         active_ids: List[str] = [campaigns[0]["id"]] if campaigns else []
-
         if campaigns:
             first = campaigns[0]
             await _safe_put(
@@ -127,7 +126,7 @@ async def run_account(
                 (login, "campaign", {"camp": first["name"], "game": first["game"]}),
             )
 
-            # 2) Попробовать получить живые каналы детальнее
+            # 2) попробовать получить живые каналы детальнее
             ch_items = await _initial_channels(api, first["id"])
             if not ch_items and first.get("channels"):
                 # fallback — если хотя бы логины есть в dashboard
@@ -136,11 +135,11 @@ async def run_account(
 
         await _safe_put(queue, (login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-        # 3) Цикл ожидания команд/останова
+        # 3) цикл ожидания команд/останова
         while not stop_evt.is_set():
             try:
                 if cmd_q is None:
-                    await asyncio.wait_for(asyncio.sleep(0.8), timeout=0.8)
+                    await asyncio.sleep(0.8)
                     continue
                 cmd, arg = await asyncio.wait_for(cmd_q.get(), timeout=0.8)
             except asyncio.TimeoutError:
@@ -169,8 +168,7 @@ async def run_account(
                             await _safe_put(queue, (login, "channels", {"channels": ch_items}))
 
             elif cmd == "switch":
-                # ручная смена канала: майнеру нечего «переключать» без видеособиратора,
-                # поэтому просто подсветим в GUI (он сам ре-упорядочит список)
+                # ручная смена канала: без видеособиратора просто подсветим в GUI
                 await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
 
         await _safe_put(queue, (login, "status", {"status": "Stopped"}))
