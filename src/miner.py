@@ -1,5 +1,6 @@
 # src/miner.py
 from __future__ import annotations
+
 import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -111,13 +112,14 @@ async def run_account(
     await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
 
     try:
-        # 1) дашборд дропсов
+        # 1) Дашборд дропсов → список кампаний
         dashboard = await api.viewer_dashboard()
         campaigns = _parse_campaigns_from_dashboard(dashboard)
         await _safe_put(queue, (login, "campaigns", {"campaigns": campaigns}))
 
-        # выберем первую как активную по умолчанию
+        # По умолчанию выберем первую кампанию, если она есть
         active_ids: List[str] = [campaigns[0]["id"]] if campaigns else []
+
         if campaigns:
             first = campaigns[0]
             await _safe_put(
@@ -125,7 +127,7 @@ async def run_account(
                 (login, "campaign", {"camp": first["name"], "game": first["game"]}),
             )
 
-            # 2) попробовать получить живые каналы детальнее
+            # 2) Попробовать получить живые каналы детальнее
             ch_items = await _initial_channels(api, first["id"])
             if not ch_items and first.get("channels"):
                 # fallback — если хотя бы логины есть в dashboard
@@ -134,9 +136,8 @@ async def run_account(
 
         await _safe_put(queue, (login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-        # 3) цикл ожидания команд/останова
+        # 3) Цикл ожидания команд/останова
         while not stop_evt.is_set():
-            # ждём команду с таймаутом — чтобы иметь шанс проверять stop_evt
             try:
                 if cmd_q is None:
                     await asyncio.wait_for(asyncio.sleep(0.8), timeout=0.8)
