@@ -252,7 +252,7 @@ class MainWindow(QMainWindow):
             chan = names[idx]
             cmd_q = self.cmds.get(login)
             if cmd_q:
-                cmd_q.put_nowait(("switch", chan))
+                cmd_q.put_nowait(("switch", chan)))
 
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
@@ -488,7 +488,6 @@ class MainWindow(QMainWindow):
                 if chan:
                     items = sorted(items, key=lambda c: c.get('name') != chan)
                     self.channels[login] = items
-                # исправлено: было .инjoin, должно быть .join
                 txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
                 self.tbl.setItem(r, 5, QTableWidgetItem(txt))
                 if chan:
