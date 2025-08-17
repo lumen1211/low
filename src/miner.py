@@ -41,7 +41,7 @@ def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
             game = c.get("game") or c.get("gameTitle") or {}
             gname = (game.get("name") or game.get("displayName") or "") or "—"
 
-            # Попытка достать список разрешённых каналов из кампании (если twitch их отдаёт)
+            # Попытка достать список разрешённых каналов из кампании (если Twitch их отдаёт)
             channels: List[str] = []
             for ck in ("allowlistedChannels", "allowList", "allowedChannels", "channels"):
                 if isinstance(c.get(ck), list):
@@ -168,7 +168,7 @@ async def run_account(
                             await _safe_put(queue, (login, "channels", {"channels": ch_items}))
 
             elif cmd == "switch":
-                # ручная смена канала: майнеру тут нечего «переключать» без видеособиратора,
+                # ручная смена канала: майнеру нечего «переключать» без видеособиратора,
                 # поэтому просто подсветим в GUI (он сам ре-упорядочит список)
                 await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
 
