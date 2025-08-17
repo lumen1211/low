@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 from .gui import MainWindow
+from .ops import load_ops, missing_ops
 
 
 def create_sample_txt(path: Path):
@@ -60,6 +61,11 @@ def main():
     if not args.accounts:
         print("Укажите --accounts путь (CSV или TXT)")
         sys.exit(2)
+
+    miss = missing_ops(load_ops())
+    if miss:
+        print(f"Отсутствуют хэши GQL для: {', '.join(miss)}")
+        sys.exit(1)
 
     app = QApplication(sys.argv)
     win = MainWindow(Path(args.accounts))
