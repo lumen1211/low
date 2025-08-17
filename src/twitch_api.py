@@ -1,3 +1,4 @@
+# src/twitch_api.py
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +56,7 @@ class TwitchAPI:
                     json=payload,
                     proxy=self.proxy,
                     headers={
-                        "Client-ID": self.client_id,      # допускается также Client-Id
+                        "Client-ID": self.client_id,
                         "Authorization": f"OAuth {self.auth}",
                         "Content-Type": "application/json",
                     },
@@ -66,7 +67,6 @@ class TwitchAPI:
                         continue
                     if 200 <= r.status < 300:
                         data = await r.json()
-                        # иногда приходит список с единственным объектом
                         if isinstance(data, list):
                             data = data[0]
                         if isinstance(data, dict) and data.get("errors"):
@@ -80,7 +80,7 @@ class TwitchAPI:
                 if attempt > 5:
                     raise
 
-    # ----------------- Удобные обёртки над операциями -----------------
+    # ----------------- Удобные обёртки -----------------
 
     async def viewer_dashboard(self) -> Any:
         await self.start()
@@ -115,7 +115,6 @@ class TwitchAPI:
             camp = d.get("campaign") or d.get("dropsCampaign") or {}
             avail = camp.get("availableChannels") or camp.get("channels") or []
             for ch in avail:
-                # Twitch может слать либо объект {channel:{...}}, либо плоский объект канала
                 chan = ch.get("channel") if isinstance(ch, dict) else None
                 chan_obj = chan if isinstance(chan, dict) else (ch if isinstance(ch, dict) else {})
                 cid = chan_obj.get("id") or chan_obj.get("login") or ""
