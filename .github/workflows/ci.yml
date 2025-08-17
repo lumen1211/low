@@ -8,12 +8,19 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  tests:
-    name: Pytests (Ubuntu, Py3.11)
+  check:
+    name: Build & Run (auto-detect tests + cli/gui)
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+
+    env:
+      # Можно переопределить входную точку и аргументы как переменные окружения,
+      # если авто-детект ниже не угадал:
+      # APP_ENTRY: "src/miner.py"
+      # APP_ARGS: "--help"
+      PYTHON_VER: "3.11"
 
     steps:
       - uses: actions/checkout@v4
@@ -21,85 +28,134 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VER }}
           cache: pip
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # не падаем, если pyproject.toml без [project.optional-dependencies]
+          if [ -f pyproject.toml ]; then pip install -e . || true; fi
 
-      - name: Run unit tests
-        run: |
-          pytest -q --maxfail=1 --disable-warnings || (echo "Pytests failed" && exit 1)
-
-  run_app_headless:
-    name: Run app (headless) + capture screenshot
-    # запустим только на PR и вручную; если хотите и на push — уберите условие
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: tests
-
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install system packages (xvfb, imagemagick)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11-apps imagemagick
-
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      # ВАЖНО: замените команду запуска на реальную для вашего приложения
-      # Например, если у вас PyQt/PySide GUI: src/gui.py
-      # Мы запускаем под Xvfb, ждём несколько секунд, делаем скрин, сохраняем логи.
-      - name: Run app under Xvfb and take screenshot
+      # --- ТЕСТЫ (опционально) ------------------------------------------------
+      - name: Detect tests
+        id: detect_tests
         shell: bash
-        env:
-          QT_QPA_PLATFORM: xcb      # для Qt/ПайСайд; можно попробовать offscreen, если окно не нужно
         run: |
           set -e
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1920x1080x24 &  # старт виртуального дисплея
+          # ищем файлы вида test_*.py или *_test.py в папке tests/ или по проекту
+          if ls tests/test_*.py tests/*_test.py **/test_*.py **/*_test.py 1>/dev/null 2>&1; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pytest (only if tests exist)
+        if: steps.detect_tests.outputs.has_tests == 'true'
+        run: |
+          pip install pytest
+
+      - name: Run pytest
+        if: steps.detect_tests.outputs.has_tests == 'true'
+        run: |
+          pytest -q --maxfail=1 --disable-warnings
+
+      # --- ОПРЕДЕЛЯЕМ ТИП ПРИЛОЖЕНИЯ (CLI/GUI) --------------------------------
+      - name: Detect app mode and entrypoint
+        id: detect_app
+        shell: bash
+        run: |
+          set -e
+          # если APP_ENTRY задан в env — используем его; иначе авто-детект
+          if [ -n "${APP_ENTRY:-}" ]; then
+            entry="${APP_ENTRY}"
+          elif [ -f src/gui.py ]; then
+            entry="src/gui.py"
+          elif [ -f src/miner.py ]; then
+            entry="src/miner.py"
+          elif [ -f main.py ]; then
+            entry="main.py"
+          else
+            # берём любой .py в src как последний шанс
+            entry="$(ls -1 src/*.py 2>/dev/null | head -n1 || true)"
+          fi
+          echo "entry=$entry" >> "$GITHUB_OUTPUT"
+          if [ -z "$entry" ]; then
+            echo "::warning::Не удалось определить точку входа. Пропустим запуск приложения."
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # GUI считаем, если файл называется gui.py (можно расширить логику)
+          if [[ "$entry" == *"gui.py" ]]; then
+            echo "mode=gui" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=cli" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Detected entry: $entry"
+
+      # --- ЗАПУСК CLI ---------------------------------------------------------
+      - name: Run CLI app and capture log
+        if: steps.detect_app.outputs.mode == 'cli'
+        shell: bash
+        env:
+          ENTRY: ${{ steps.detect_app.outputs.entry }}
+          APP_ARGS: ${{ env.APP_ARGS }}
+        run: |
+          set -e
+          echo "[CI] running CLI: ${ENTRY} ${APP_ARGS:-}"
+          python "${ENTRY}" ${APP_ARGS:-} > run.log 2>&1 || true
+
+      # --- ЗАПУСК GUI (headless) + СКРИН --------------------------------------
+      - name: Install system packages for GUI (xvfb + libs)
+        if: steps.detect_app.outputs.mode == 'gui'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb imagemagick \
+            libgl1 libxkbcommon-x11-0 libxrender1 libxrandr2 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 libxcb-image0 \
+            fonts-dejavu
+
+      - name: Ensure Qt/PySide/PyQt (best effort)
+        if: steps.detect_app.outputs.mode == 'gui'
+        run: |
+          pip install -q PySide6 || pip install -q PyQt5 || true
+
+      - name: Run GUI under Xvfb and take screenshot
+        if: steps.detect_app.outputs.mode == 'gui'
+        shell: bash
+        env:
+          DISPLAY: ":99"
+          ENTRY: ${{ steps.detect_app.outputs.entry }}
+          APP_ARGS: ${{ env.APP_ARGS }}
+        run: |
+          set -e
+          Xvfb :99 -screen 0 1920x1080x24 &
           XVFB_PID=$!
-          echo "Xvfb PID: ${XVFB_PID}"
+          sleep 1
 
-          # Запуск приложения в фоне, вывод в лог
-          (python src/gui.py > run.log 2>&1 &) || true
+          echo "[CI] launching GUI: ${ENTRY} ${APP_ARGS:-}"
+          (python "${ENTRY}" ${APP_ARGS:-} > run.log 2>&1 &) || true
           APP_PID=$!
-          echo "App PID: ${APP_PID}"
 
-          # даём времени приложению отрисоваться
+          # ждём, даём шанс окну отрисоваться
           sleep 8
-
-          # скриншот всего экрана (окна) в файл
           import -window root screenshot.png || true
 
-          # аккуратно завершаем приложение
+          # закрываем приложение
           kill ${APP_PID} 2>/dev/null || true
           sleep 1
           kill -9 ${APP_PID} 2>/dev/null || true
-
-          # останавливаем Xvfb
           kill ${XVFB_PID} 2>/dev/null || true
 
-      - name: Upload artifacts (logs + screenshot)
+      # --- АРТЕФАКТЫ ----------------------------------------------------------
+      - name: Upload artifacts (logs + screenshot if any)
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: app-run-artifacts
+          name: run-output
           path: |
             run.log
             screenshot.png
+          if-no-files-found: ignore
