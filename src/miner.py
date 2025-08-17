@@ -181,3 +181,4 @@ async def run_account(
             await api.close()
         except Exception:
             pass
+
