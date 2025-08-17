@@ -10,6 +10,7 @@ from yarl import URL
 from .ops import load_ops
 
 GQL = URL("https://gql.twitch.tv/gql")
+MAX_RETRIES = 5
 
 
 class TwitchAPI:
@@ -39,7 +40,7 @@ class TwitchAPI:
             raise RuntimeError("Session not started; call start() first")
 
         h = self.ops.get(operation, "")
-        if not h or h.startswith("actual_hash"):
+        if not h or str(h).startswith("actual_hash"):
             raise RuntimeError(f"Persisted hash for {operation} not set in ops/ops.json")
 
         payload = {
@@ -62,11 +63,14 @@ class TwitchAPI:
                     },
                 ) as r:
                     if r.status == 429:
-                        await asyncio.sleep(min(60, 2**attempt))
                         attempt += 1
+                        if attempt > MAX_RETRIES:
+                            raise RuntimeError("GQL 429: Too Many Requests; retry limit exceeded")
+                        await asyncio.sleep(min(60, 2 ** (attempt - 1)))
                         continue
                     if 200 <= r.status < 300:
                         data = await r.json()
+                        # иногда приходит список с единственным объектом
                         if isinstance(data, list):
                             data = data[0]
                         if isinstance(data, dict) and data.get("errors"):
@@ -75,10 +79,10 @@ class TwitchAPI:
                     text = await r.text()
                     raise RuntimeError(f"GQL {r.status}: {text}")
             except aiohttp.ClientError:
-                await asyncio.sleep(min(60, 2**attempt))
                 attempt += 1
-                if attempt > 5:
+                if attempt > MAX_RETRIES:
                     raise
+                await asyncio.sleep(min(60, 2 ** (attempt - 1)))
 
     # ----------------- Удобные обёртки -----------------
 
@@ -115,6 +119,7 @@ class TwitchAPI:
             camp = d.get("campaign") or d.get("dropsCampaign") or {}
             avail = camp.get("availableChannels") or camp.get("channels") or []
             for ch in avail:
+                # Twitch может слать либо объект {channel:{...}}, либо плоский объект канала
                 chan = ch.get("channel") if isinstance(ch, dict) else None
                 chan_obj = chan if isinstance(chan, dict) else (ch if isinstance(ch, dict) else {})
                 cid = chan_obj.get("id") or chan_obj.get("login") or ""
