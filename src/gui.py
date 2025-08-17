@@ -252,7 +252,7 @@ class MainWindow(QMainWindow):
             chan = names[idx]
             cmd_q = self.cmds.get(login)
             if cmd_q:
-                cmd_q.put_nowait(("switch", chan)))
+                cmd_q.put_nowait(("switch", chan))
 
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
