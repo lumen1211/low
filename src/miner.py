@@ -112,7 +112,7 @@ async def run_account(
     await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
 
     try:
-        # 1) дашборд дропсов
+        # 1) Дашборд дропсов
         dashboard = await api.viewer_dashboard()
         campaigns = _parse_campaigns_from_dashboard(dashboard)
         await _safe_put(queue, (login, "campaigns", {"campaigns": campaigns}))
@@ -181,4 +181,3 @@ async def run_account(
             await api.close()
         except Exception:
             pass
-
