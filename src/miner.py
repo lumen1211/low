@@ -41,6 +41,7 @@ def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
             game = c.get("game") or c.get("gameTitle") or {}
             gname = (game.get("name") or game.get("displayName") or "") or "—"
 
+            # Попытка достать список разрешённых каналов из кампании (если twitch их отдаёт)
             channels: List[str] = []
             for ck in ("allowlistedChannels", "allowList", "allowedChannels", "channels"):
                 if isinstance(c.get(ck), list):
@@ -59,6 +60,7 @@ def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
 
             out.append({"id": cid, "name": cname, "game": gname, "channels": channels})
     except Exception:
+        # молча — вернём то, что получилось (или пусто)
         pass
     return out
 
@@ -70,6 +72,7 @@ async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, 
     """
     try:
         chans = await api.get_live_channels(campaign_id)  # List[tuple[id_or_login, viewers, live]]
+        # сортируем по зрителям (desc)
         chans.sort(key=lambda x: x[1], reverse=True)
         items: List[Dict[str, Any]] = []
         for cid_or_login, viewers, live in chans:
@@ -125,6 +128,7 @@ async def run_account(
             # 2) попробовать получить живые каналы детальнее
             ch_items = await _initial_channels(api, first["id"])
             if not ch_items and first.get("channels"):
+                # fallback — если хотя бы логины есть в dashboard
                 ch_items = [{"name": n, "viewers": 0, "live": False} for n in first["channels"]]
             await _safe_put(queue, (login, "channels", {"channels": ch_items}))
 
@@ -132,6 +136,7 @@ async def run_account(
 
         # 3) цикл ожидания команд/останова
         while not stop_evt.is_set():
+            # ждём команду с таймаутом — чтобы иметь шанс проверять stop_evt
             try:
                 if cmd_q is None:
                     await asyncio.wait_for(asyncio.sleep(0.8), timeout=0.8)
@@ -144,10 +149,13 @@ async def run_account(
                 continue
 
             if cmd == "select_campaigns":
+                # пользователь выбрал кампании в GUI-диалоге
                 if isinstance(arg, list):
+                    # оставляем только реально доступные
                     ids = [cid for cid in arg if any(c["id"] == cid for c in campaigns)]
                     if ids:
                         active_ids = ids
+                        # отобразим первую выбранную
                         info = next((c for c in campaigns if c["id"] == active_ids[0]), None)
                         if info:
                             await _safe_put(
@@ -160,7 +168,8 @@ async def run_account(
                             await _safe_put(queue, (login, "channels", {"channels": ch_items}))
 
             elif cmd == "switch":
-                # GUI подсветит выбранный канал
+                # ручная смена канала: майнеру тут нечего «переключать» без видеособиратора,
+                # поэтому просто подсветим в GUI (он сам ре-упорядочит список)
                 await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
 
         await _safe_put(queue, (login, "status", {"status": "Stopped"}))

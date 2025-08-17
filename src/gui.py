@@ -488,7 +488,7 @@ class MainWindow(QMainWindow):
                 if chan:
                     items = sorted(items, key=lambda c: c.get('name') != chan)
                     self.channels[login] = items
-                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                txt = "\n".инjoin(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
                 self.tbl.setItem(r, 5, QTableWidgetItem(txt))
                 if chan:
                     self.log_line(f"switched to {chan}", login=login)
@@ -546,4 +546,3 @@ class MainWindow(QMainWindow):
         self.loop.stop()
         self.loop.close()
         super().closeEvent(event)
-
