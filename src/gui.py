@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-import requests
+import aiohttp
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QProgressBar,
@@ -257,63 +257,93 @@ class MainWindow(QMainWindow):
     # ── actions ────────────────────────────────────────────────────────────────
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
+        # запускаем асинхронную проверку, чтобы не блокировать GUI
+        self.loop.create_task(self._check_gql_async())
+
+    async def _check_gql_async(self):
         ok = exp = miss = other = 0
-        for a in self.accounts:
-            login = a.login
-            r = self.row_of(login)
-            if r < 0:
-                continue
 
-            cookie_file = Path(COOKIES_DIR) / f"{login}.json"
-            if not cookie_file.exists():
-                self.tbl.item(r, 2).setText("NO COOKIES")
-                self.log_line(f"NO COOKIES — {cookie_file} not found", login=login, level="ERROR")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as session:
+            async def _check_one(a: Account) -> str:
+                login = a.login
+                r = self.row_of(login)
+                if r < 0:
+                    return "other"
+
+                cookie_file = Path(COOKIES_DIR) / f"{login}.json}"
+                cookie_file = Path(COOKIES_DIR) / f"{login}.json"
+                if not cookie_file.exists():
+                    await self.queue.put((login, "status", {
+                        "status": "NO COOKIES",
+                        "note": f"{cookie_file} not found",
+                    }))
+                    return "miss"
+
+                token = ""
+                try:
+                    data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                    for c in data:
+                        if c.get("name") == "auth-token":
+                            token = c.get("value") or ""
+                            break
+                except Exception as e:
+                    await self.queue.put((login, "status", {
+                        "status": "BAD COOKIES",
+                        "note": str(e),
+                    }))
+                    return "other"
+
+                if not token:
+                    await self.queue.put((login, "status", {
+                        "status": "NO TOKEN",
+                        "note": "NO TOKEN in cookies",
+                    }))
+                    return "miss"
+
+                try:
+                    async with session.get(
+                        "https://id.twitch.tv/oauth2/validate",
+                        headers={"Authorization": f"OAuth {token}"},
+                    ) as resp:
+                        if resp.status == 200:
+                            j = await resp.json()
+                            login_resp = j.get("login", "?")
+                            scopes = ",".join(j.get("scopes", []))
+                            await self.queue.put((login, "status", {
+                                "status": "OK",
+                                "note": f"login={login_resp} scopes=[{scopes}]",
+                            }))
+                            return "ok"
+                        elif resp.status in (401, 403):
+                            await self.queue.put((login, "status", {
+                                "status": "EXPIRED",
+                                "note": "token invalid",
+                            }))
+                            return "exp"
+                        else:
+                            text = (await resp.text())[:120]
+                            await self.queue.put((login, "status", {
+                                "status": f"HTTP {resp.status}",
+                                "note": text,
+                            }))
+                            return "other"
+                except Exception as e:
+                    await self.queue.put((login, "status", {
+                        "status": "ERROR",
+                        "note": str(e),
+                    }))
+                    return "other"
+
+            results = await asyncio.gather(*(_check_one(a) for a in self.accounts))
+
+        for res in results:
+            if res == "ok":
+                ok += 1
+            elif res == "exp":
+                exp += 1
+            elif res == "miss":
                 miss += 1
-                continue
-
-            token = ""
-            try:
-                data = json.loads(cookie_file.read_text(encoding="utf-8"))
-                for c in data:
-                    if c.get("name") == "auth-token":
-                        token = c.get("value") or ""
-                        break
-            except Exception as e:
-                self.tbl.item(r, 2).setText("BAD COOKIES")
-                self.log_line(f"BAD COOKIES — {e}", login=login, level="ERROR")
-                other += 1
-                continue
-
-            if not token:
-                self.tbl.item(r, 2).setText("NO TOKEN")
-                self.log_line("NO TOKEN in cookies", login=login, level="ERROR")
-                miss += 1
-                continue
-
-            try:
-                resp = requests.get(
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {token}"},
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    self.tbl.item(r, 2).setText("OK")
-                    j = resp.json()
-                    login_resp = j.get("login", "?")
-                    scopes = ",".join(j.get("scopes", []))
-                    self.log_line(f"OK — login={login_resp} scopes=[{scopes}]", login=login)
-                    ok += 1
-                elif resp.status_code in (401, 403):
-                    self.tbl.item(r, 2).setText("EXPIRED")
-                    self.log_line("EXPIRED — token invalid", login=login, level="ERROR")
-                    exp += 1
-                else:
-                    self.tbl.item(r, 2).setText(f"HTTP {resp.status_code}")
-                    self.log_line(f"HTTP {resp.status_code}: {resp.text[:120]}", login=login, level="ERROR")
-                    other += 1
-            except Exception as e:
-                self.tbl.item(r, 2).setText("ERROR")
-                self.log_line(f"ERROR — {e}", login=login, level="ERROR")
+            else:
                 other += 1
 
         self.log_line(f"Итог: OK={ok} EXPIRED={exp} NO_COOKIES/NO_TOKEN={miss} OTHER={other}")
@@ -349,168 +379,4 @@ class MainWindow(QMainWindow):
     def campaign_settings(self):
         """Открыть диалог выбора кампаний для текущего аккаунта."""
         r = self.tbl.currentRow()
-        if r < 0:
-            return
-        login = self.tbl.item(r, 1).text()
-        campaigns = self.available_campaigns.get(login, [])
-        if not campaigns:
-            self.log_line("Нет данных о кампаниях", login=login)
-            return
-        selected = self.selected_campaigns.get(login, [c.get("id") for c in campaigns])
-        dlg = CampaignSettingsDialog(campaigns, selected, self)
-        if dlg.exec():
-            ids = dlg.selected()
-            self.selected_campaigns[login] = ids
-            q = self.cmds.get(login)
-            if q:
-                q.put_nowait(("select_campaigns", ids))
-
-    # ── пер-аккаунтный запуск/остановка ────────────────────────────────────────
-    def start_account(self, login: str):
-        if login in self.tasks:
-            return
-        acc = next((a for a in self.accounts if a.login == login), None)
-        if not acc:
-            return
-        stop = asyncio.Event()
-        self.stops[login] = stop
-        cmd_q: asyncio.Queue = asyncio.Queue()
-        self.cmds[login] = cmd_q
-        t = self.loop.create_task(run_account(login, acc.proxy, self.queue, stop, cmd_q))
-        self.tasks[login] = t
-        acc.status = "Running"
-        r = self.row_of(login)
-        if r >= 0:
-            btn = self.tbl.cellWidget(r, 9)
-            if isinstance(btn, QPushButton):
-                btn.setText("Stop")
-            self.tbl.item(r, 2).setText("Starting")
-        self.refresh_totals()
-
-    def stop_account(self, login: str):
-        evt = self.stops.pop(login, None)
-        if evt:
-            evt.set()
-        self.tasks.pop(login, None)
-        self.cmds.pop(login, None)
-        acc = next((a for a in self.accounts if a.login == login), None)
-        if acc:
-            acc.status = "Stopped"
-        r = self.row_of(login)
-        if r >= 0:
-            btn = self.tbl.cellWidget(r, 9)
-            if isinstance(btn, QPushButton):
-                btn.setText("Start")
-            self.tbl.item(r, 2).setText("Stopped")
-        self.refresh_totals()
-
-    def start_stop_account(self, login: str):
-        if login in self.tasks:
-            self.stop_account(login)
-        else:
-            self.start_account(login)
-
-    def start_all(self):
-        for a in self.accounts:
-            self.start_account(a.login)
-
-    def stop_all(self):
-        for login in list(self.tasks.keys()):
-            self.stop_account(login)
-
-    # ── корутина-приёмник сообщений от miner.py ────────────────────────────────
-    async def feeder(self):
-        while True:
-            login, kind, p = await self.queue.get()
-            r = self.row_of(login)
-            if r < 0:
-                continue
-            if kind == "status":
-                self.tbl.item(r, 2).setText(p.get("status", ""))
-                note = p.get("note")
-                if note:
-                    self.log_line(note, login=login)
-            elif kind == "campaign":
-                self.tbl.item(r, 3).setText(p.get("camp", "") or "—")
-                self.tbl.item(r, 4).setText(p.get("game", "") or "—")
-            elif kind == "campaigns":
-                # список доступных кампаний (для диалога + выпадающий список)
-                camps = p.get("campaigns", [])
-                self.available_campaigns[login] = camps
-                if login not in self.selected_campaigns:
-                    self.selected_campaigns[login] = [c.get("id") for c in camps]
-                # заполним выпадающий список в таблице
-                cmb = self.cmb_campaigns.get(login)
-                if cmb is not None:
-                    cmb.blockSignals(True)
-                    cmb.clear()
-                    for c in camps:
-                        cmb.addItem(c.get("name", c.get("id", "—")), c.get("id"))
-                    cmb.blockSignals(False)
-                self.log_line(f"Доступно кампаний: {len(camps)}", login=login)
-            elif kind == "channels":
-                items = p.get("channels", [])
-                self.channels[login] = items
-                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
-                self.tbl.setItem(r, 5, QTableWidgetItem(txt))
-            elif kind == "switch":
-                chan = p.get("channel", "")
-                items = self.channels.get(login, [])
-                if chan:
-                    items = sorted(items, key=lambda c: c.get('name') != chan)
-                    self.channels[login] = items
-                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
-                self.tbl.setItem(r, 5, QTableWidgetItem(txt))
-                if chan:
-                    self.log_line(f"switched to {chan}", login=login)
-            elif kind == "progress":
-                # поддерживаем и старый remain, и новый next (+ опциональный drop)
-                pb = self.tbl.cellWidget(r, 6)
-                if isinstance(pb, QProgressBar):
-                    pb.setValue(int(p.get("pct", 0)))
-                    drop = p.get("drop")
-                    pb.setFormat(f"{drop} %p%" if drop else "%p%")
-                remain_secs = p.get("remain")
-                if remain_secs is None:
-                    remain_secs = p.get("next", 0)
-                self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
-            elif kind == "claimed":
-                self.metrics["claimed"] += 1
-                pb = self.tbl.cellWidget(r, 6)
-                if isinstance(pb, QProgressBar):
-                    pb.setValue(int(p.get("pct", 0)))
-                    drop = p.get("drop")
-                    pb.setFormat(f"{drop} %p%" if drop else "%p%")
-                remain_secs = p.get("remain")
-                if remain_secs is None:
-                    remain_secs = p.get("next", 0)
-                self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
-                self.tbl.item(r, 8).setText(p.get("at", ""))
-                self.log_line(f"Claimed {p.get('drop','')}", login=login)
-            elif kind == "error":
-                self.metrics["errors"] += 1
-                self.log_line(f"ERROR: {p.get('msg','')}", login=login, level="ERROR")
-            self.refresh_totals()
-
-    # ── короткий «тик» asyncio-цикла, чтобы задачи выполнялись ────────────────
-    def pump(self):
-        try:
-            self.loop.run_until_complete(asyncio.sleep(0))
-        except Exception:
-            pass
-
-    # ── корректное завершение приложения ──────────────────────────────────────
-    def closeEvent(self, event):
-        # просим остановиться все воркеры
-        running_tasks = list(self.tasks.values())
-        running_tasks.append(self._feeder_task)
-        self.stop_all()
-        for t in running_tasks:
-            t.cancel()
-        if running_tasks:
-            self.loop.run_until_complete(
-                asyncio.gather(*running_tasks, return_exceptions=True)
-            )
-        self.loop.stop()
-        self.loop.close()
-        super().closeEvent(event)
+        if r <
