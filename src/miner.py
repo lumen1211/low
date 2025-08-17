@@ -1,153 +1,183 @@
 # src/miner.py
-# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 import asyncio
-import json
-from pathlib import Path
-from typing import Optional, Dict, Any
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-import aiohttp
-
+from .accounts import auth_token_from_cookies
 from .twitch_api import TwitchAPI
 
-async def _read_auth_token(cookies_dir: Path, login: str) -> Optional[str]:
-    fp = cookies_dir / f"{login}.json"
-    if not fp.exists():
-        return None
-    try:
-        data = json.loads(fp.read_text(encoding="utf-8"))
-        for c in data:
-            if c.get("name") == "auth-token":
-                return c.get("value") or ""
-    except Exception:
-        return None
-    return None
 
-async def run_account(login: str, proxy: Optional[str], queue, stop_evt: asyncio.Event):
+async def _safe_put(queue: asyncio.Queue, payload: Tuple[str, str, Dict[str, Any]]):
+    """Кладём сообщение в GUI-очередь, не роняя воркер из-за случайной ошибки."""
+    try:
+        await queue.put(payload)
+    except Exception:
+        pass
+
+
+def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
     """
-    Основной рабочий цикл аккаунта.
-    - читает cookies/<login>.json -> auth-token
-    - через TwitchAPI получает кампании, отслеживает прогресс и автоматически клеймит дропы
-    - обновляет GUI: статус, кампания/игра, прогресс
+    Выдёргиваем список кампаний из ответа ViewerDropsDashboard.
+    Возвращаем список словарей: {id, name, game, channels(str[])}.
     """
-    cookies_dir = Path("cookies")
-    token = await _read_auth_token(cookies_dir, login)
+    out: List[Dict[str, Any]] = []
+    try:
+        d = (data or {}).get("data") or {}
+        vd = d.get("viewer") or d.get("currentUser") or {}
+        drops = vd.get("dropsDashboard") or vd.get("drops") or vd
+
+        raw_camps = []
+        if isinstance(drops, dict):
+            if isinstance(drops.get("currentCampaigns"), list):
+                raw_camps = drops["currentCampaigns"]
+            elif isinstance(drops.get("availableCampaigns"), list):
+                raw_camps = drops["availableCampaigns"]
+            elif isinstance(drops.get("campaigns"), list):
+                raw_camps = drops["campaigns"]
+
+        for c in raw_camps or []:
+            cid = c.get("id") or c.get("campaignID") or c.get("campaignId") or ""
+            cname = c.get("name") or c.get("displayName") or cid
+            game = c.get("game") or c.get("gameTitle") or {}
+            gname = (game.get("name") or game.get("displayName") or "") or "—"
+
+            # Попытка достать список разрешённых каналов из кампании (если Twitch их отдаёт)
+            channels: List[str] = []
+            for ck in ("allowlistedChannels", "allowList", "allowedChannels", "channels"):
+                if isinstance(c.get(ck), list):
+                    for ch in c[ck]:
+                        nm = (
+                            ch.get("name")
+                            or ch.get("displayName")
+                            or ch.get("login")
+                            or ch.get("channelLogin")
+                            or ""
+                        )
+                        if nm:
+                            channels.append(nm)
+                    if channels:
+                        break
+
+            out.append({"id": cid, "name": cname, "game": gname, "channels": channels})
+    except Exception:
+        # молча — вернём то, что получилось (или пусто)
+        pass
+    return out
+
+
+async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, Any]]:
+    """
+    Получаем живые каналы по кампании через DropsCampaignDetails.
+    Возвращаем список словарей: {name, viewers, live}.
+    """
+    try:
+        chans = await api.get_live_channels(campaign_id)  # List[tuple[id_or_login, viewers, live]]
+        # сортируем по зрителям (desc)
+        chans.sort(key=lambda x: x[1], reverse=True)
+        items: List[Dict[str, Any]] = []
+        for cid_or_login, viewers, live in chans:
+            items.append(
+                {"name": str(cid_or_login) or "unknown", "viewers": int(viewers or 0), "live": bool(live)}
+            )
+        return items
+    except Exception:
+        return []
+
+
+async def run_account(
+    login: str,
+    proxy: Optional[str],
+    queue: asyncio.Queue,
+    stop_evt: asyncio.Event,
+    cmd_q: Optional[asyncio.Queue] = None,
+):
+    """
+    Воркер для одного аккаунта:
+      1) читает cookies/<login>.json -> auth-token
+      2) запрашивает ViewerDropsDashboard и публикует список кампаний
+      3) публикует активную кампанию и список каналов по ней (если удаётся)
+      4) ждёт команды из cmd_q: 'select_campaigns', 'switch'
+    """
+    await _safe_put(queue, (login, "status", {"status": "Starting", "note": "Init worker"}))
+
+    token = auth_token_from_cookies(login)
     if not token:
-        await queue.put((login, "error", {"msg": "no cookies/auth-token"}))
+        await _safe_put(queue, (login, "error", {"msg": "no cookies/auth-token"}))
+        await _safe_put(queue, (login, "status", {"status": "Stopped"}))
         return
 
     api = TwitchAPI(token, proxy=proxy or "")
     await api.start()
+    await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
 
-    def find_time_based_drop(obj: Any) -> Optional[Dict[str, Any]]:
-        if isinstance(obj, dict):
-            if {"requiredMinutesWatched", "currentMinutesWatched", "dropInstanceID"} <= obj.keys():
-                return obj
-            for v in obj.values():
-                res = find_time_based_drop(v)
-                if res:
-                    return res
-        elif isinstance(obj, list):
-            for v in obj:
-                res = find_time_based_drop(v)
-                if res:
-                    return res
-        return None
-
-    await queue.put((login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
     try:
-        data = await api.viewer_dashboard()
+        # 1) Дашборд дропсов
+        dashboard = await api.viewer_dashboard()
+        campaigns = _parse_campaigns_from_dashboard(dashboard)
+        await _safe_put(queue, (login, "campaigns", {"campaigns": campaigns}))
 
-        camp_name = ""
-        game_name = ""
-        channel_id = ""
+        # выберем первую как активную по умолчанию
+        active_ids: List[str] = [campaigns[0]["id"]] if campaigns else []
+        if campaigns:
+            first = campaigns[0]
+            await _safe_put(
+                queue,
+                (login, "campaign", {"camp": first["name"], "game": first["game"]}),
+            )
+
+            # 2) попробовать получить живые каналы детальнее
+            ch_items = await _initial_channels(api, first["id"])
+            if not ch_items and first.get("channels"):
+                # fallback — если хотя бы логины есть в dashboard
+                ch_items = [{"name": n, "viewers": 0, "live": False} for n in first["channels"]]
+            await _safe_put(queue, (login, "channels", {"channels": ch_items}))
+
+        await _safe_put(queue, (login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
+
+        # 3) цикл ожидания команд/останова
+        while not stop_evt.is_set():
+            try:
+                if cmd_q is None:
+                    await asyncio.sleep(0.8)
+                    continue
+                cmd, arg = await asyncio.wait_for(cmd_q.get(), timeout=0.8)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                await _safe_put(queue, (login, "error", {"msg": f"cmd_q error: {e}"}))
+                continue
+
+            if cmd == "select_campaigns":
+                # пользователь выбрал кампании в GUI-диалоге
+                if isinstance(arg, list):
+                    # оставляем только реально доступные
+                    ids = [cid for cid in arg if any(c["id"] == cid for c in campaigns)]
+                    if ids:
+                        active_ids = ids
+                        # отобразим первую выбранную
+                        info = next((c for c in campaigns if c["id"] == active_ids[0]), None)
+                        if info:
+                            await _safe_put(
+                                queue,
+                                (login, "campaign", {"camp": info["name"], "game": info["game"]}),
+                            )
+                            ch_items = await _initial_channels(api, info["id"])
+                            if not ch_items and info.get("channels"):
+                                ch_items = [{"name": n, "viewers": 0, "live": False} for n in info["channels"]]
+                            await _safe_put(queue, (login, "channels", {"channels": ch_items}))
+
+            elif cmd == "switch":
+                # ручная смена канала: без видеособиратора просто подсветим в GUI
+                await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
+
+        await _safe_put(queue, (login, "status", {"status": "Stopped"}))
+
+    except Exception as e:
+        await _safe_put(queue, (login, "error", {"msg": f"GQL error: {e}"}))
+        await _safe_put(queue, (login, "status", {"status": "Stopped"}))
+    finally:
         try:
-            import re, json as _json
-            d = (data or {}).get("data") or {}
-            vd = d.get("viewer") or d.get("currentUser") or {}
-            drops = vd.get("dropsDashboard") or vd.get("drops") or vd
-
-            if isinstance(drops, dict):
-                campaigns = []
-                if isinstance(drops.get("currentCampaigns"), list):
-                    campaigns = drops["currentCampaigns"]
-                elif isinstance(drops.get("availableCampaigns"), list):
-                    campaigns = drops["availableCampaigns"]
-                elif isinstance(drops.get("campaigns"), list):
-                    campaigns = drops["campaigns"]
-                elif isinstance(drops.get("currentDropCampaigns"), list):
-                    campaigns = drops["currentDropCampaigns"]
-
-                if campaigns:
-                    c0 = campaigns[0]
-                    camp_name = c0.get("name") or c0.get("displayName") or c0.get("id", "")
-                    game = c0.get("game") or c0.get("gameTitle") or {}
-                    game_name = game.get("name") or game.get("displayName") or ""
-                    ch = c0.get("broadcaster") or c0.get("channel") or {}
-                    if isinstance(ch, dict):
-                        channel_id = ch.get("id") or ch.get("_id") or ch.get("channelID") or ""
-            if not channel_id or not camp_name:
-                txt = _json.dumps(drops)
-                if not channel_id:
-                    m = re.search(r'"channelID"\s*:\s*"(\d+)"', txt) or re.search(r'"id"\s*:\s*"(\d+)"', txt)
-                    if m:
-                        channel_id = m.group(1)
-                if not camp_name:
-                    m = re.search(r'"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"name"\s*:\s*"([^"]+)"', txt)
-                    if m:
-                        camp_name = m.group(1)
-                    m2 = re.search(r'"gameTitle"\s*:\s*{[^}]*"displayName"\s*:\s*"([^"]+)"', txt) or re.search(r'"game"\s*:\s*{[^}]*"name"\s*:\s*"([^"]+)"', txt)
-                    if m2:
-                        game_name = m2.group(1)
+            await api.close()
         except Exception:
             pass
-
-        await queue.put((login, "campaign", {"camp": camp_name or "—", "game": game_name or "—"}))
-        await queue.put((login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
-
-        if not channel_id:
-            raise RuntimeError("active channel not found")
-
-        loop = asyncio.get_event_loop()
-        last_inv = last_inc = 0.0
-        while not stop_evt.is_set():
-            now = loop.time()
-            if now - last_inc >= 60:
-                try:
-                    await api.increment(channel_id)
-                except (aiohttp.ClientError, RuntimeError) as e:
-                    await queue.put((login, "error", {"msg": f"increment: {e}"}))
-                    break
-                last_inc = now
-            if now - last_inv >= 150:
-                try:
-                    inv = await api.inventory()
-                except (aiohttp.ClientError, RuntimeError) as e:
-                    await queue.put((login, "error", {"msg": f"inventory: {e}"}))
-                    break
-                drop = find_time_based_drop(inv)
-                if drop:
-                    required = drop.get("requiredMinutesWatched") or 0
-                    current = drop.get("currentMinutesWatched") or 0
-                    drop_id = drop.get("dropInstanceID") or ""
-                    drop_name = drop.get("name") or drop.get("dropName") or drop_id
-                    pct = (current / required * 100) if required else 0
-                    remain = max(0, required - current)
-                    await queue.put((login, "progress", {"pct": pct, "remain": remain}))
-                    if pct >= 100 and drop_id:
-                        try:
-                            await api.claim(drop_id)
-                            ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                            await queue.put((login, "claimed", {"drop": drop_name, "at": ts}))
-                            await queue.put((login, "last_claim_at", {"at": ts}))
-                        except (aiohttp.ClientError, RuntimeError) as e:
-                            await queue.put((login, "error", {"msg": f"claim: {e}"}))
-                last_inv = now
-            await asyncio.sleep(1.0)
-
-    except (aiohttp.ClientError, RuntimeError) as e:
-        await queue.put((login, "error", {"msg": f"GQL error: {e}"}))
-    finally:
-        await api.close()
-        await queue.put((login, "status", {"status": "Stopped"}))
