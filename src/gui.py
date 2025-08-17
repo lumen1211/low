@@ -270,7 +270,6 @@ class MainWindow(QMainWindow):
                 if r < 0:
                     return "other"
 
-                cookie_file = Path(COOKIES_DIR) / f"{login}.json}"
                 cookie_file = Path(COOKIES_DIR) / f"{login}.json"
                 if not cookie_file.exists():
                     await self.queue.put((login, "status", {
@@ -379,4 +378,172 @@ class MainWindow(QMainWindow):
     def campaign_settings(self):
         """Открыть диалог выбора кампаний для текущего аккаунта."""
         r = self.tbl.currentRow()
-        if r <
+        if r < 0:
+            return
+        login = self.tbl.item(r, 1).text()
+        campaigns = self.available_campaigns.get(login, [])
+        if not campaigns:
+            self.log_line("Нет данных о кампаниях", login=login)
+            return
+        selected = self.selected_campaigns.get(login, [c.get("id") for c in campaigns])
+        dlg = CampaignSettingsDialog(campaigns, selected, self)
+        if dlg.exec():
+            ids = dlg.selected()
+            self.selected_campaigns[login] = ids
+            q = self.cmds.get(login)
+            if q:
+                q.put_nowait(("select_campaigns", ids))
+
+    # ── пер-аккаунтный запуск/остановка ────────────────────────────────────────
+    def start_account(self, login: str):
+        if login in self.tasks:
+            return
+        acc = next((a for a in self.accounts if a.login == login), None)
+        if not acc:
+            return
+        stop = asyncio.Event()
+        self.stops[login] = stop
+        cmd_q: asyncio.Queue = asyncio.Queue()
+        self.cmds[login] = cmd_q
+        t = self.loop.create_task(run_account(login, acc.proxy, self.queue, stop, cmd_q))
+        self.tasks[login] = t
+        acc.status = "Running"
+        r = self.row_of(login)
+        if r >= 0:
+            btn = self.tbl.cellWidget(r, 9)
+            if isinstance(btn, QPushButton):
+                btn.setText("Stop")
+            self.tbl.item(r, 2).setText("Starting")
+        self.refresh_totals()
+
+    def stop_account(self, login: str):
+        evt = self.stops.pop(login, None)
+        if evt:
+            evt.set()
+        self.tasks.pop(login, None)
+        self.cmds.pop(login, None)
+        acc = next((a for a in self.accounts if a.login == login), None)
+        if acc:
+            acc.status = "Stopped"
+        r = self.row_of(login)
+        if r >= 0:
+            btn = self.tbl.cellWidget(r, 9)
+            if isinstance(btn, QPushButton):
+                btn.setText("Start")
+            self.tbl.item(r, 2).setText("Stopped")
+        self.refresh_totals()
+
+    def start_stop_account(self, login: str):
+        if login in self.tasks:
+            self.stop_account(login)
+        else:
+            self.start_account(login)
+
+    def start_all(self):
+        for a in self.accounts:
+            self.start_account(a.login)
+
+    def stop_all(self):
+        for login in list(self.tasks.keys()):
+            self.stop_account(login)
+
+    # ── корутина-приёмник сообщений от miner.py ────────────────────────────────
+    async def feeder(self):
+        while True:
+            login, kind, p = await self.queue.get()
+            r = self.row_of(login)
+            if r < 0:
+                continue
+            if kind == "status":
+                self.tbl.item(r, 2).setText(p.get("status", ""))
+                note = p.get("note")
+                if note:
+                    self.log_line(note, login=login)
+            elif kind == "campaign":
+                self.tbl.item(r, 3).setText(p.get("camp", "") or "—")
+                self.tbl.item(r, 4).setText(p.get("game", "") or "—")
+            elif kind == "campaigns":
+                # список доступных кампаний (для диалога + выпадающий список)
+                camps = p.get("campaigns", [])
+                self.available_campaigns[login] = camps
+                if login not in self.selected_campaigns:
+                    self.selected_campaigns[login] = [c.get("id") for c in camps]
+                # заполним выпадающий список в таблице
+                cmb = self.cmb_campaigns.get(login)
+                if cmb is not None:
+                    cmb.blockSignals(True)
+                    cmb.clear()
+                    for c in camps:
+                        cmb.addItem(c.get("name", c.get("id", "—")), c.get("id"))
+                    cmb.blockSignals(False)
+                self.log_line(f"Доступно кампаний: {len(camps)}", login=login)
+            elif kind == "channels":
+                items = p.get("channels", [])
+                self.channels[login] = items
+                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                self.tbl.setItem(r, 5, QTableWidgetItem(txt))
+            elif kind == "switch":
+                chan = p.get("channel", "")
+                items = self.channels.get(login, [])
+                if chan:
+                    items = sorted(items, key=lambda c: c.get('name') != chan)
+                    self.channels[login] = items
+                txt = "\n".join(f"{c.get('name','')} ({c.get('viewers',0)})" for c in items) or "—"
+                self.tbl.setItem(r, 5, QTableWidgetItem(txt))
+                if chan:
+                    self.log_line(f"switched to {chan}", login=login)
+            elif kind == "progress":
+                # поддерживаем и старый remain, и новый next (+ опциональный drop)
+                pb = self.tbl.cellWidget(r, 6)
+                if isinstance(pb, QProgressBar):
+                    pb.setValue(int(p.get("pct", 0)))
+                    drop = p.get("drop")
+                    pb.setFormat(f"{drop} %p%" if drop else "%p%")
+                remain_secs = p.get("remain")
+                if remain_secs is None:
+                    remain_secs = p.get("next", 0)
+                self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
+            elif kind == "claimed":
+                self.metrics["claimed"] += 1
+                pb = self.tbl.cellWidget(r, 6)
+                if isinstance(pb, QProgressBar):
+                    pb.setValue(int(p.get("pct", 0)))
+                    drop = p.get("drop")
+                    pb.setFormat(f"{drop} %p%" if drop else "%p%")
+                remain_secs = p.get("remain")
+                if remain_secs is None:
+                    remain_secs = p.get("next", 0)
+                self.tbl.setItem(r, 7, QTableWidgetItem(self._fmt_seconds(remain_secs)))
+                self.tbl.item(r, 8).setText(p.get("at", ""))
+                self.log_line(f"Claimed {p.get('drop','')}", login=login)
+            elif kind == "error":
+                self.metrics["errors"] += 1
+                self.log_line(f"ERROR: {p.get('msg','')}", login=login, level="ERROR")
+            self.refresh_totals()
+
+    # ── короткий «тик» asyncio-цикла, чтобы задачи выполнялись ────────────────
+    def pump(self):
+        try:
+            self.loop.run_until_complete(asyncio.sleep(0))
+        except Exception:
+            pass
+
+    # ── корректное завершение приложения ──────────────────────────────────────
+    def closeEvent(self, event):
+        # просим остановиться все воркеры
+        running_tasks = list(self.tasks.values())
+        running_tasks.append(self._feeder_task)
+        self.stop_all()
+        for t in running_tasks:
+            t.cancel()
+        if running_tasks:
+            try:
+                self.loop.run_until_complete(
+                    asyncio.gather(*running_tasks, return_exceptions=True)
+                )
+            except Exception:
+                pass
+        self.loop.stop()
+        self.loop.close()
+        super().closeEvent(event)
+
