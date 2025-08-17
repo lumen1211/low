@@ -14,7 +14,12 @@ MAX_RETRIES = 5
 
 
 class TwitchAPI:
-    def __init__(self, auth_token: str, client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko", proxy: str = ""):
+    def __init__(
+        self,
+        auth_token: str,
+        client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko",
+        proxy: str = "",
+    ):
         self.auth = auth_token
         self.client_id = client_id
         self.proxy = proxy or None
@@ -68,6 +73,7 @@ class TwitchAPI:
                             raise RuntimeError("GQL 429: Too Many Requests; retry limit exceeded")
                         await asyncio.sleep(min(60, 2 ** (attempt - 1)))
                         continue
+
                     if 200 <= r.status < 300:
                         data = await r.json()
                         # иногда приходит список с единственным объектом
@@ -76,8 +82,10 @@ class TwitchAPI:
                         if isinstance(data, dict) and data.get("errors"):
                             raise RuntimeError(str(data["errors"]))
                         return data
+
                     text = await r.text()
                     raise RuntimeError(f"GQL {r.status}: {text}")
+
             except aiohttp.ClientError:
                 attempt += 1
                 if attempt > MAX_RETRIES:
