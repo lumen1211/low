@@ -255,6 +255,7 @@ class MainWindow(QMainWindow):
                 cmd_q.put_nowait(("switch", chan))
 
     # ── actions ────────────────────────────────────────────────────────────────
+
     def check_gql(self):
         """Валидируем auth-token в cookies через https://id.twitch.tv/oauth2/validate."""
         # запускаем асинхронную проверку, чтобы не блокировать GUI
