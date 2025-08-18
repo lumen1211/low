@@ -75,8 +75,7 @@ async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, 
     """
     try:
         chans = await api.get_live_channels(campaign_id)  # List[tuple[id_or_login, viewers, live]]
-        # сортируем по зрителям (desc)
-        chans.sort(key=lambda x: x[1], reverse=True)
+        chans.sort(key=lambda x: x[1], reverse=True)  # сортируем по зрителям (desc)
         items: List[Dict[str, Any]] = []
         for cid_or_login, viewers, live in chans:
             items.append(
@@ -160,6 +159,7 @@ async def run_account(
                 # fallback — если хотя бы логины есть в dashboard
                 ch_items = [{"name": n, "viewers": 0, "live": False} for n in selected_campaign["channels"]]
             await _safe_put(queue, (login, "channels", {"channels": ch_items}))
+
         await _safe_put(queue, (login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
         # 3) Периодические задачи: инкремент (если есть numeric channel id) и инвентори
