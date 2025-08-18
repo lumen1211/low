@@ -11,6 +11,9 @@ class Account:
     totp_secret: str = ""
     status: str = "Idle"
     note: str = ""
+    # ID выбранной кампании (для GQL-трекера)
+    campaign_id: str = ""
+    # Человеко-понятное имя активной кампании
     active_campaign: str = ""
     game: str = ""
     progress_pct: float = 0.0

@@ -1,17 +1,22 @@
 # src/onboarding.py
 from __future__ import annotations
+
+import json
+import os
+import re
+import time
 from pathlib import Path
-import json, time, os, re
-from typing import Iterable, Tuple, List, Dict, Optional, Callable
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import pyotp
-from playwright.sync_api import sync_playwright, Page, Locator
+from playwright.sync_api import Locator, Page, sync_playwright
 
 LOGIN_URL = "https://www.twitch.tv/login?no-reload=true"
 
-# ───────── helpers ─────────
 
-def _launch_browser(p):
+# ───────── helpers ─────────
+def _launch_browser(p, proxy: str = ""):
     args = [
         "--disable-blink-features=AutomationControlled",
         "--disable-extensions",
@@ -22,22 +27,37 @@ def _launch_browser(p):
     if os.environ.get("TW_ONB_DISABLE_GPU", "0") == "1":
         args += ["--disable-gpu", "--disable-software-rasterizer"]
 
+    proxy_opt = None
+    if proxy:
+        u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+        server = f"{u.scheme or 'http'}://{u.hostname}:{u.port}" if u.hostname and u.port else None
+        if server:
+            proxy_opt = {"server": server}
+            if u.username:
+                proxy_opt["username"] = u.username
+            if u.password:
+                proxy_opt["password"] = u.password
+
+    # пытаемся использовать system-chromium (chrome/edge), если доступен
     for channel in ("chrome", "msedge", None):
         try:
             if channel:
-                return p.chromium.launch(channel=channel, headless=False, args=args)
+                return p.chromium.launch(channel=channel, headless=False, args=args, proxy=proxy_opt)
             else:
-                return p.chromium.launch(headless=False, args=args)
+                return p.chromium.launch(headless=False, args=args, proxy=proxy_opt)
         except Exception:
             continue
-    return p.chromium.launch(headless=False)
+    # последний шанс: без channel
+    return p.chromium.launch(headless=False, proxy=proxy_opt)
+
 
 def _cookies_map(context) -> Dict[str, str]:
     try:
         cookies = context.cookies()
     except Exception:
         return {}
-    return {c.get("name",""): c.get("value","") for c in cookies if c.get("name")}
+    return {c.get("name", ""): c.get("value", "") for c in cookies if c.get("name")}
+
 
 def _goto(page: Page, url: str) -> None:
     for _ in range(4):
@@ -47,12 +67,14 @@ def _goto(page: Page, url: str) -> None:
         except Exception:
             time.sleep(0.6)
 
+
 def _click_if_exists(page: Page, selector: str, timeout_ms: int = 1500) -> bool:
     try:
         page.locator(selector).first.click(timeout=timeout_ms)
         return True
     except Exception:
         return False
+
 
 def _dismiss_consent(page: Page) -> None:
     for sel in (
@@ -66,10 +88,12 @@ def _dismiss_consent(page: Page) -> None:
         if _click_if_exists(page, sel, 800):
             break
 
+
 def _wait_visible(page: Page, css: str, timeout: int = 30000) -> Locator:
     loc = page.locator(css).first
     loc.wait_for(state="visible", timeout=timeout)
     return loc
+
 
 def _fill_js(page: Page, selector: str, value: str) -> None:
     try:
@@ -85,14 +109,18 @@ def _fill_js(page: Page, selector: str, value: str) -> None:
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true}));
             }""",
-            selector, value
+            selector,
+            value,
         )
     except Exception:
         pass
 
+
 def _fill_strong(page: Page, loc: Locator, selector_for_js: str, text: str) -> None:
-    try: loc.scroll_into_view_if_needed(timeout=1500)
-    except Exception: pass
+    try:
+        loc.scroll_into_view_if_needed(timeout=1500)
+    except Exception:
+        pass
     for op in ("click", "fill", "type"):
         try:
             if op == "click":
@@ -110,16 +138,20 @@ def _fill_strong(page: Page, loc: Locator, selector_for_js: str, text: str) -> N
             pass
     _fill_js(page, selector_for_js, text)
 
+
 def _autofill_and_submit(page: Page, login: str, password: str) -> None:
     user_css = ':is(input#login-username, input[name="login"], input[autocomplete="username"], input[type="text"])'
     pass_css = ':is(input[type="password"], input#password-input, input[name="password"], input[autocomplete="current-password"])'
     user = _wait_visible(page, user_css)
-    pwd  = _wait_visible(page, pass_css)
+    pwd = _wait_visible(page, pass_css)
     _fill_strong(page, user, user_css, login)
-    _fill_strong(page, pwd,  pass_css, password)
+    _fill_strong(page, pwd, pass_css, password)
     if not _click_if_exists(page, 'button[data-a-target="passport-login-button"]', 2500):
-        try: page.keyboard.press("Enter")
-        except Exception: pass
+        try:
+            page.keyboard.press("Enter")
+        except Exception:
+            pass
+
 
 def _maybe_enter_totp(page: Page, totp_secret: str) -> None:
     if not totp_secret:
@@ -132,6 +164,7 @@ def _maybe_enter_totp(page: Page, totp_secret: str) -> None:
         _click_if_exists(page, 'button[data-a-target="two-factor-submit"]', 2000)
     except Exception:
         pass
+
 
 def _text_any(page: Page, patterns: List[str], timeout: int = 350) -> bool:
     """Проверка наличия текста: regex через text=/.../i и get_by_text (на всякий случай)."""
@@ -148,11 +181,16 @@ def _text_any(page: Page, patterns: List[str], timeout: int = 350) -> bool:
             pass
     return False
 
+
 def _email_challenge_present(page: Page) -> bool:
-    if _text_any(page, [
-        r"Введите код из электронной почты",
-        r"Enter the code from your email",
-    ]): return True
+    if _text_any(
+        page,
+        [
+            r"Введите код из электронной почты",
+            r"Enter the code from your email",
+        ],
+    ):
+        return True
     try:
         if page.locator('input[type="text"][maxlength="1"]').count() >= 6:
             return True
@@ -165,13 +203,19 @@ def _email_challenge_present(page: Page) -> bool:
         pass
     return False
 
+
 def _username_not_exist(page: Page) -> bool:
     # максимально «широкие» матчеры RU/EN
-    return _text_any(page, [
-        r"Такого\s+имени\s+пользователя\s+не\s+существует",
-        r"Имя\s+пользователя\s+не\s+существует",
-        r"(that|this)\s+username\s+does(?:n['’]t| not)\s+exist",
-    ], timeout=450)
+    return _text_any(
+        page,
+        [
+            r"Такого\s+имени\s+пользователя\s+не\s+существует",
+            r"Имя\s+пользователя\s+не\s+существует",
+            r"(that|this)\s+username\s+does(?:n['’]t| not)\s+exist",
+        ],
+        timeout=450,
+    )
+
 
 def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
     try:
@@ -182,8 +226,9 @@ def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
             raw = line.rstrip("\r\n")
             s = raw.strip()
             if not s:
-                out.append(raw); continue
-            # "login:pass" (твоя схема) — самое надёжное
+                out.append(raw)
+                continue
+            # "login:pass" — самое надёжное
             if s.startswith(f"{login}:"):
                 removed = True
                 continue
@@ -198,14 +243,22 @@ def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
     except Exception:
         return False
 
-# ───────── public API ─────────
 
-def login_and_save_cookies(login: str, password: str, out_path: Path, totp_secret: str = "", timeout_s: int = 180) -> dict:
-    res = bulk_onboarding([(login, password, totp_secret)], out_dir=out_path.parent, timeout_s=timeout_s)
+# ───────── public API ─────────
+def login_and_save_cookies(
+    login: str,
+    password: str,
+    out_path: Path,
+    totp_secret: str = "",
+    proxy: str = "",
+    timeout_s: int = 180,
+) -> dict:
+    res = bulk_onboarding([(login, password, totp_secret, proxy)], out_dir=out_path.parent, timeout_s=timeout_s)
     return res[0] if res else {"result": "FAILED", "note": "unknown error"}
 
+
 def bulk_onboarding(
-    accounts: Iterable[Tuple[str, str, str]],
+    accounts: Iterable[Tuple[str, str, str, str]],
     out_dir: Path,
     timeout_s: int = 180,
     progress_cb: Optional[Callable[[Dict[str, str]], None]] = None,
@@ -216,20 +269,47 @@ def bulk_onboarding(
       - OK → сохраняем cookies/<login>.json
       - EMAIL_2FA_REQUIRED → SKIP
       - USERNAME_NOT_FOUND → DELETE и удаляем из accounts.txt (если указан путь)
+    Поддерживается пер-аккаунтный proxy (перезапуск браузера при смене значения).
     """
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     results: List[Dict[str, str]] = []
 
     with sync_playwright() as p:
-        browser = _launch_browser(p)
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = context.new_page(); page.bring_to_front()
+        browser = None
+        context = None
+        page = None
+        current_proxy: Optional[str] = None
 
-        for login, password, totp in accounts:
+        for item in accounts:
+            login = item[0]
+            password = item[1]
+            totp = item[2] if len(item) >= 3 else ""
+            proxy = item[3] if len(item) >= 4 else ""
+
+            # при смене прокси перезапускаем браузер/контекст
+            if proxy != current_proxy or browser is None or context is None or page is None:
+                try:
+                    context and context.close()
+                except Exception:
+                    pass
+                try:
+                    browser and browser.close()
+                except Exception:
+                    pass
+                browser = _launch_browser(p, proxy)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                page = context.new_page()
+                page.bring_to_front()
+                current_proxy = proxy
+            else:
+                # очищаем куки перед следующей попыткой в том же контексте
+                try:
+                    context.clear_cookies()
+                except Exception:
+                    pass
+
             progress_cb and progress_cb({"login": login, "result": "STEP", "note": "Открываю форму логина"})
-            try: context.clear_cookies()
-            except Exception: pass
-
             _goto(page, LOGIN_URL)
             _dismiss_consent(page)
 
@@ -248,36 +328,42 @@ def bulk_onboarding(
             saved = False
             t0 = time.time()
             while time.time() - t0 < timeout_s:
-                # успех
+                # успех (видим кнопку юзер-меню и/или появились ключевые cookies)
                 try:
                     page.wait_for_selector('[data-a-target="user-menu-toggle"]', timeout=900)
                 except Exception:
                     pass
+
                 kv = _cookies_map(context)
                 if kv.get("auth-token") or kv.get("twilight-user"):
                     out_path = out_dir / f"{login}.json"
-                    out_path.write_text(json.dumps(context.cookies(), indent=2, ensure_ascii=False), encoding="utf-8")
+                    out_path.write_text(
+                        json.dumps(context.cookies(), indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
                     res = {"login": login, "result": "OK", "note": f"cookies → {out_path}"}
-                    results.append(res); progress_cb and progress_cb(res)
+                    results.append(res)
+                    progress_cb and progress_cb(res)
                     saved = True
                     break
 
                 # особые кейсы — чтобы не виснуть
                 if _email_challenge_present(page):
                     res = {"login": login, "result": "SKIP", "note": "EMAIL_2FA_REQUIRED"}
-                    results.append(res); progress_cb and progress_cb(res)
+                    results.append(res)
+                    progress_cb and progress_cb(res)
                     saved = True
                     break
 
                 if _username_not_exist(page):
                     note = "USERNAME_NOT_FOUND"
-                    removed = False
                     if accounts_file and accounts_file.exists():
                         removed = _remove_from_accounts_file(accounts_file, login)
                         if removed:
                             note += " — removed from accounts.txt"
                     res = {"login": login, "result": "DELETE", "note": note}
-                    results.append(res); progress_cb and progress_cb(res)
+                    results.append(res)
+                    progress_cb and progress_cb(res)
                     saved = True
                     break
 
@@ -285,11 +371,17 @@ def bulk_onboarding(
 
             if not saved:
                 res = {"login": login, "result": "FAILED", "note": last_err or "Пер-аккаунт таймаут"}
-                results.append(res); progress_cb and progress_cb(res)
+                results.append(res)
+                progress_cb and progress_cb(res)
 
-        try: context.close()
-        except Exception: pass
-        try: browser.close()
-        except Exception: pass
+        # финальная очистка
+        try:
+            context and context.close()
+        except Exception:
+            pass
+        try:
+            browser and browser.close()
+        except Exception:
+            pass
 
     return results
