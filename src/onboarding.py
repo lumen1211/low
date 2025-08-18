@@ -38,7 +38,6 @@ def _launch_browser(p, proxy: str = ""):
             if u.password:
                 proxy_opt["password"] = u.password
 
-    # пытаемся использовать system-chromium (chrome/edge), если доступен
     for channel in ("chrome", "msedge", None):
         try:
             if channel:
@@ -47,7 +46,6 @@ def _launch_browser(p, proxy: str = ""):
                 return p.chromium.launch(headless=False, args=args, proxy=proxy_opt)
         except Exception:
             continue
-    # последний шанс: без channel
     return p.chromium.launch(headless=False, proxy=proxy_opt)
 
 
@@ -167,7 +165,6 @@ def _maybe_enter_totp(page: Page, totp_secret: str) -> None:
 
 
 def _text_any(page: Page, patterns: List[str], timeout: int = 350) -> bool:
-    """Проверка наличия текста: regex через text=/.../i и get_by_text (на всякий случай)."""
     for pat in patterns:
         try:
             if page.locator(f"text=/{pat}/i").first.is_visible(timeout=timeout):
@@ -205,7 +202,6 @@ def _email_challenge_present(page: Page) -> bool:
 
 
 def _username_not_exist(page: Page) -> bool:
-    # максимально «широкие» матчеры RU/EN
     return _text_any(
         page,
         [
@@ -228,11 +224,9 @@ def _remove_from_accounts_file(accounts_file: Path, login: str) -> bool:
             if not s:
                 out.append(raw)
                 continue
-            # "login:pass" — самое надёжное
             if s.startswith(f"{login}:"):
                 removed = True
                 continue
-            # CSV-поддержка на всякий
             if f",{login}," in s or s == login:
                 removed = True
                 continue
@@ -264,13 +258,6 @@ def bulk_onboarding(
     progress_cb: Optional[Callable[[Dict[str, str]], None]] = None,
     accounts_file: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
-    """
-    Один браузер Playwright, один таб. Для аккаунтов:
-      - OK → сохраняем cookies/<login>.json
-      - EMAIL_2FA_REQUIRED → SKIP
-      - USERNAME_NOT_FOUND → DELETE и удаляем из accounts.txt (если указан путь)
-    Поддерживается пер-аккаунтный proxy (перезапуск браузера при смене значения).
-    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: List[Dict[str, str]] = []
@@ -287,7 +274,6 @@ def bulk_onboarding(
             totp = item[2] if len(item) >= 3 else ""
             proxy = item[3] if len(item) >= 4 else ""
 
-            # при смене прокси перезапускаем браузер/контекст
             if proxy != current_proxy or browser is None or context is None or page is None:
                 try:
                     context and context.close()
@@ -303,7 +289,6 @@ def bulk_onboarding(
                 page.bring_to_front()
                 current_proxy = proxy
             else:
-                # очищаем куки перед следующей попыткой в том же контексте
                 try:
                     context.clear_cookies()
                 except Exception:
@@ -328,7 +313,6 @@ def bulk_onboarding(
             saved = False
             t0 = time.time()
             while time.time() - t0 < timeout_s:
-                # успех (видим кнопку юзер-меню и/или появились ключевые cookies)
                 try:
                     page.wait_for_selector('[data-a-target="user-menu-toggle"]', timeout=900)
                 except Exception:
@@ -347,7 +331,6 @@ def bulk_onboarding(
                     saved = True
                     break
 
-                # особые кейсы — чтобы не виснуть
                 if _email_challenge_present(page):
                     res = {"login": login, "result": "SKIP", "note": "EMAIL_2FA_REQUIRED"}
                     results.append(res)
@@ -374,7 +357,6 @@ def bulk_onboarding(
                 results.append(res)
                 progress_cb and progress_cb(res)
 
-        # финальная очистка
         try:
             context and context.close()
         except Exception:

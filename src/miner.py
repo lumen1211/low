@@ -63,7 +63,6 @@ def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
 
             out.append({"id": cid, "name": cname, "game": gname, "channels": channels})
     except Exception:
-        # молча — вернём то, что получилось (или пусто)
         pass
     return out
 
@@ -75,7 +74,7 @@ async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, 
     """
     try:
         chans = await api.get_live_channels(campaign_id)  # List[tuple[id_or_login, viewers, live]]
-        chans.sort(key=lambda x: x[1], reverse=True)  # сортируем по зрителям (desc)
+        chans.sort(key=lambda x: x[1], reverse=True)
         items: List[Dict[str, Any]] = []
         for cid_or_login, viewers, live in chans:
             items.append(
@@ -153,38 +152,36 @@ async def run_account(
                 (login, "campaign", {"camp": selected_campaign["name"], "game": selected_campaign["game"]}),
             )
 
-            # 2) попробовать получить живые каналы детальнее
+            # 2) список живых каналов
             ch_items = await _initial_channels(api, selected_campaign["id"])
             if not ch_items and selected_campaign.get("channels"):
-                # fallback — если хотя бы логины есть в dashboard
                 ch_items = [{"name": n, "viewers": 0, "live": False} for n in selected_campaign["channels"]]
             await _safe_put(queue, (login, "channels", {"channels": ch_items}))
 
         await _safe_put(queue, (login, "status", {"status": "Ready", "note": "Campaigns discovered"}))
 
-        # 3) Периодические задачи: инкремент (если есть numeric channel id) и инвентори
+        # 3) периодика: increment + inventory
         loop = asyncio.get_event_loop()
         next_inc = loop.time() + 60.0
         next_inv = loop.time() + random.uniform(120.0, 180.0)
 
-        # выберем канал для increment: берём первый с числовым id из DropsCampaignDetails
+        # numeric channel id для increment (если удастся найти)
         increment_channel_id: Optional[str] = None
         try:
             if selected_campaign:
                 live = await api.get_live_channels(selected_campaign["id"])
-                # live: list[(cid_or_login, viewers, is_live)]
                 for cid, _v, _live in live:
                     if isinstance(cid, str) and cid.isdigit():
                         increment_channel_id = cid
                         break
         except Exception:
-            increment_channel_id = None  # просто не будем вызывать increment
+            increment_channel_id = None
 
-        # 4) Главный цикл
+        # 4) цикл
         while not stop_evt.is_set():
             now = loop.time()
 
-            # обработка команд GUI (не блокируя)
+            # команды из GUI
             if cmd_q is not None:
                 try:
                     cmd, arg = cmd_q.get_nowait()
@@ -194,10 +191,9 @@ async def run_account(
                             active_ids = ids
                             selected_campaign = next((c for c in campaigns if c["id"] == active_ids[0]), selected_campaign)
                             if selected_campaign:
-                                await _safe_put(
-                                    queue,
-                                    (login, "campaign", {"camp": selected_campaign["name"], "game": selected_campaign["game"]}),
-                                )
+                                await _safe_put(queue, (login, "campaign", {
+                                    "camp": selected_campaign["name"], "game": selected_campaign["game"]
+                                }))
                                 ch_items = await _initial_channels(api, selected_campaign["id"])
                                 if not ch_items and selected_campaign.get("channels"):
                                     ch_items = [{"name": n, "viewers": 0, "live": False} for n in selected_campaign["channels"]]
@@ -213,14 +209,13 @@ async def run_account(
                                 except Exception:
                                     pass
                     elif cmd == "switch":
-                        # ручная смена канала: без видеособиратора просто подсветим в GUI
                         await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
                 except asyncio.QueueEmpty:
                     pass
                 except Exception as e:
                     await _safe_put(queue, (login, "error", {"msg": f"cmd_q error: {e}"}))
 
-            # increment прогресса раз в ~60 сек, если удалось найти numeric channel id
+            # increment раз в ~60 сек
             if increment_channel_id and now >= next_inc:
                 try:
                     await api.increment(increment_channel_id)
@@ -228,7 +223,7 @@ async def run_account(
                     await _safe_put(queue, (login, "error", {"msg": f"increment error: {e}"}))
                 next_inc = now + 60.0
 
-            # inventory поллинг с джиттером
+            # inventory с джиттером
             if now >= next_inv:
                 try:
                     inv = await api.inventory()
@@ -245,19 +240,13 @@ async def run_account(
                         )
                         pct = (cur / req * 100) if req else 0.0
                         remain = max(0, req - cur)
-                        await _safe_put(
-                            queue,
-                            (login, "progress", {"pct": pct, "remain": remain, "drop": drop_name}),
-                        )
+                        await _safe_put(queue, (login, "progress", {"pct": pct, "remain": remain, "drop": drop_name}))
 
                         if req and cur >= req and did:
                             try:
                                 await api.claim(did)
                                 ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                                await _safe_put(
-                                    queue,
-                                    (login, "claimed", {"drop": drop_name, "at": ts, "pct": 100, "remain": 0}),
-                                )
+                                await _safe_put(queue, (login, "claimed", {"drop": drop_name, "at": ts, "pct": 100, "remain": 0}))
                             except Exception as e:
                                 await _safe_put(queue, (login, "error", {"msg": f"claim error: {e}"}))
                 except Exception as e:

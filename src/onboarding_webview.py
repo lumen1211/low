@@ -95,12 +95,25 @@ class WebOnboarding(QDialog):
         self._next()
 
     def _apply_proxy(self, proxy: str) -> None:
-        if proxy:
-            u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
-            qp = QNetworkProxy(QNetworkProxy.HttpProxy, u.hostname or "", u.port or 0, u.username or "", u.password or "")
-        else:
-            qp = QNetworkProxy()
+        """Установка HTTP/SOCKS прокси для профиля, поддержка логина/пароля."""
         try:
+            if proxy:
+                u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+                # Определяем тип прокси
+                scheme = (u.scheme or "http").lower()
+                if scheme.startswith("socks"):
+                    ptype = QNetworkProxy.Socks5Proxy
+                else:
+                    ptype = QNetworkProxy.HttpProxy
+                qp = QNetworkProxy(
+                    ptype,
+                    u.hostname or "",
+                    u.port or 0,
+                    u.username or "",
+                    u.password or "",
+                )
+            else:
+                qp = QNetworkProxy(QNetworkProxy.NoProxy)
             self.profile.setHttpProxy(qp)
         except Exception:
             pass

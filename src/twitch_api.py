@@ -22,7 +22,7 @@ class TwitchAPI:
     ):
         self.auth = auth_token
         self.client_id = client_id
-        self.proxy = proxy or None
+        self.proxy = proxy or None  # прокси указываем на уровне запроса
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
         self.ua = (
@@ -33,8 +33,9 @@ class TwitchAPI:
 
     async def start(self) -> None:
         if not self.session or self.session.closed:
-            connector = aiohttp.ProxyConnector.from_url(self.proxy) if self.proxy else None
-            self.session = aiohttp.ClientSession(headers={"User-Agent": self.ua}, connector=connector)
+            # В aiohttp нет глобального параметра proxy у ClientSession.
+            # Используем proxy=... в каждом запросе (см. self.gql()).
+            self.session = aiohttp.ClientSession(headers={"User-Agent": self.ua})
 
     async def close(self) -> None:
         if self.session and not self.session.closed:
@@ -61,7 +62,7 @@ class TwitchAPI:
                 async with self.session.post(
                     GQL,
                     json=payload,
-                    proxy=self.proxy,
+                    proxy=self.proxy,  # прокси на уровне запроса
                     headers={
                         "Client-ID": self.client_id,
                         "Authorization": f"OAuth {self.auth}",
