@@ -194,9 +194,10 @@ async def run_account(
                             active_ids = ids
                             selected_campaign = next((c for c in campaigns if c["id"] == active_ids[0]), selected_campaign)
                             if selected_campaign:
-                                await _safe_put(queue, (login, "campaign", {
-                                    "camp": selected_campaign["name"], "game": selected_campaign["game"]
-                                }))
+                                await _safe_put(
+                                    queue,
+                                    (login, "campaign", {"camp": selected_campaign["name"], "game": selected_campaign["game"]}),
+                                )
                                 ch_items = await _initial_channels(api, selected_campaign["id"])
                                 if not ch_items and selected_campaign.get("channels"):
                                     ch_items = [{"name": n, "viewers": 0, "live": False} for n in selected_campaign["channels"]]
@@ -212,6 +213,7 @@ async def run_account(
                                 except Exception:
                                     pass
                     elif cmd == "switch":
+                        # ручная смена канала: без видеособиратора просто подсветим в GUI
                         await _safe_put(queue, (login, "switch", {"channel": str(arg or "")}))
                 except asyncio.QueueEmpty:
                     pass
@@ -224,7 +226,6 @@ async def run_account(
                     await api.increment(increment_channel_id)
                 except Exception as e:
                     await _safe_put(queue, (login, "error", {"msg": f"increment error: {e}"}))
-                    # не выходим — просто попробуем позже
                 next_inc = now + 60.0
 
             # inventory поллинг с джиттером
@@ -244,13 +245,19 @@ async def run_account(
                         )
                         pct = (cur / req * 100) if req else 0.0
                         remain = max(0, req - cur)
-                        await _safe_put(queue, (login, "progress", {"pct": pct, "remain": remain, "drop": drop_name}))
+                        await _safe_put(
+                            queue,
+                            (login, "progress", {"pct": pct, "remain": remain, "drop": drop_name}),
+                        )
 
                         if req and cur >= req and did:
                             try:
                                 await api.claim(did)
                                 ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                                await _safe_put(queue, (login, "claimed", {"drop": drop_name, "at": ts, "pct": 100, "remain": 0}))
+                                await _safe_put(
+                                    queue,
+                                    (login, "claimed", {"drop": drop_name, "at": ts, "pct": 100, "remain": 0}),
+                                )
                             except Exception as e:
                                 await _safe_put(queue, (login, "error", {"msg": f"claim error: {e}"}))
                 except Exception as e:
