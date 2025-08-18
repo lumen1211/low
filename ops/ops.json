@@ -1,6 +1,7 @@
 {
   "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
-  "Inventory": "actual_hash_from_browser_devtools",
-  "IncrementDropCurrentSessionProgress": "actual_hash_from_browser_devtools",
-  "ClaimDropReward": "actual_hash_from_browser_devtools"
+  "Inventory": "87898f86e7dd3ccd87c897a8ccb269168ec4414c30002e3e5bb3fff2241f4cdf",
+  "IncrementDropCurrentSessionProgress": "390fa0d9e33e312055f4a09c165f96885737b4fbb8e450021bb538a84b397bc5",
+  "ClaimDropReward": "dbb24b34d9e955a3358c82eeb0a6d4fa70ab9b9d74997e33a3b9a010a14bc6c2",
+  "DropsCampaignDetails": "actual_hash_from_browser_devtools"
 }
