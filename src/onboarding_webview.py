@@ -94,16 +94,31 @@ class WebOnboarding(QDialog):
 
         self._next()
 
-    # ---------- scripts ----------
-    def _set_proxy(self, proxy: str) -> None:
-        if not proxy:
-            self.profile.setHttpProxy(QNetworkProxy(QNetworkProxy.NoProxy))
-            return
-        u = urlparse(proxy)
-        ptype = QNetworkProxy.Socks5Proxy if u.scheme.startswith("socks") else QNetworkProxy.HttpProxy
-        qnp = QNetworkProxy(ptype, u.hostname or "", u.port or 0, u.username or "", u.password or "")
-        self.profile.setHttpProxy(qnp)
+    def _apply_proxy(self, proxy: str) -> None:
+        """Установка HTTP/SOCKS прокси для профиля, поддержка логина/пароля."""
+        try:
+            if proxy:
+                u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+                # Определяем тип прокси
+                scheme = (u.scheme or "http").lower()
+                if scheme.startswith("socks"):
+                    ptype = QNetworkProxy.Socks5Proxy
+                else:
+                    ptype = QNetworkProxy.HttpProxy
+                qp = QNetworkProxy(
+                    ptype,
+                    u.hostname or "",
+                    u.port or 0,
+                    u.username or "",
+                    u.password or "",
+                )
+            else:
+                qp = QNetworkProxy(QNetworkProxy.NoProxy)
+            self.profile.setHttpProxy(qp)
+        except Exception:
+            pass
 
+    # ---------- scripts ----------
     def _install_scripts(self, login: str, password: str) -> None:
         # Полностью очищаем коллекцию и вставляем два скрипта (scaffold + autofill)
         coll = self.page.scripts()
@@ -204,7 +219,8 @@ class WebOnboarding(QDialog):
             self.profile.clearHttpCache()
         except Exception:
             pass
-        self._set_proxy(acc.proxy)
+
+        self._apply_proxy(acc.proxy)
         self._install_scripts(acc.login, acc.password)
         self.timer.start(self.timeout_ms)
         self.view.setUrl(QUrl(LOGIN_URL))
