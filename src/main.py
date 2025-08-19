@@ -67,12 +67,6 @@ def main():
         print(f"Отсутствуют хэши GQL для: {', '.join(miss)}")
         sys.exit(1)
 
-    from .ops import load_ops, missing_ops
-    miss = missing_ops(load_ops())
-    if miss:
-        print("Отсутствуют GQL операции в ops/ops.json: " + ", ".join(miss))
-        sys.exit(1)
-
     app = QApplication(sys.argv)
     win = MainWindow(Path(args.accounts))
     win.show()
