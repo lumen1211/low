@@ -7,8 +7,8 @@ def test_missing_ops_detects_missing_hash(tmp_path, monkeypatch):
     data = {
         "ViewerDropsDashboard": "hash",
         "Inventory": "hash",
-        "IncrementDropCurrentSessionProgress": "hash",
-        "ClaimDropReward": "hash",
+        "DropCurrentSessionContext": "hash",
+        "DropsPage_ClaimDropRewards": "hash",
     }
     path = tmp_path / "ops.json"
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -22,8 +22,8 @@ def test_missing_ops_accepts_alias(tmp_path, monkeypatch):
     data = {
         "ViewerDropsDashboard": "hash",
         "Inventory": "hash",
-        "IncrementDropCurrentSessionProgress": "hash",
-        "ClaimDropReward": "hash",
+        "DropCurrentSessionContext": "hash",
+        "DropsPage_ClaimDropRewards": "hash",
         "DropCampaignDetails": "hash",
     }
     path = tmp_path / "ops.json"

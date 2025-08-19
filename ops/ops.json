@@ -1,8 +1,8 @@
 {
-  "ViewerDropsDashboard": "30ae6031cdfe0ea3f96a26caf96095a5336b7ccd4e0e7fe9bb2ff1b4cc7efabc",
-  "Inventory": "87898f86e7dd3ccd87c897a8ccb269168ec4414c30002e3e5bb3fff2241f4cdf",
-  "IncrementDropCurrentSessionProgress": "390fa0d9e33e312055f4a09c165f96885737b4fbb8e450021bb538a84b397bc5",
-  "ClaimDropReward": "dbb24b34d9e955a3358c82eeb0a6d4fa70ab9b9d74997e33a3b9a010a14bc6c2",
-  "DropsCampaignDetails": "067586e4b7cc7597f3df5ff9df26eebaa4491ba4e56cf9af34f77571292efb61",
-  "DropCampaignDetails": "067586e4b7cc7597f3df5ff9df26eebaa4491ba4e56cf9af34f77571292efb61"
+  "ViewerDropsDashboard": "602b275e4775941fab2d958a2b414878485f8ae546d35da417f1386bfa49a0b8",
+  "Inventory": "b973b60718d582e0076b93bd11af7bf974032b5baac5a6d0aab49083b43ffb0b",
+  "DropCurrentSessionContext": "5b23225a6beade1703383c49b59f0f7c471bd16c21bcfcce68e1b8289b56b831",
+  "DropsPage_ClaimDropRewards": "73a6597588962e7d21b87f929581133e2cd5b796aad7a73094cc17ded3a6cfe8",
+  "DropsCampaignDetails": "ee55b7d28481480c20b0126153e0513aa0cd5e6546e36050010ac7c325e431a9",
+  "DropCampaignDetails": "e3361709648d06803e1b1ee3f26bbb83f19fef51606b7d6f40285bf77a50a790"
 }

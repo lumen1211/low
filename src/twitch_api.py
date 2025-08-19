@@ -104,11 +104,14 @@ class TwitchAPI:
 
     async def increment(self, channel_id: str) -> Any:
         await self.start()
-        return await self.gql("IncrementDropCurrentSessionProgress", {"channelID": channel_id})
+        return await self.gql("DropCurrentSessionContext", {"channelID": channel_id})
 
     async def claim(self, drop_instance_id: str) -> Any:
         await self.start()
-        return await self.gql("ClaimDropReward", {"dropInstanceID": drop_instance_id})
+        return await self.gql(
+            "DropsPage_ClaimDropRewards",
+            {"input": {"dropInstanceIDs": [drop_instance_id]}},
+        )
 
     async def campaign_details(self, campaign_id: str) -> Any:
         await self.start()

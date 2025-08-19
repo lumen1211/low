@@ -15,8 +15,8 @@ ALIASES = {
 REQUIRED = [
     "ViewerDropsDashboard",
     "Inventory",
-    "IncrementDropCurrentSessionProgress",
-    "ClaimDropReward",
+    "DropCurrentSessionContext",
+    "DropsPage_ClaimDropRewards",
     "DropsCampaignDetails",
 ]
 
