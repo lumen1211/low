@@ -70,7 +70,18 @@ class TwitchAPI:
                     if r.status == 429:
                         attempt += 1
                         if attempt > MAX_RETRIES:
-                            raise RuntimeError("GQL 429: Too Many Requests; retry limit exceeded")
+                            raise RuntimeError(
+                                "GQL 429: Too Many Requests; retry limit exceeded"
+                            )
+                        await asyncio.sleep(min(60, 2 ** (attempt - 1)))
+                        continue
+
+                    if 500 <= r.status < 600:
+                        attempt += 1
+                        if attempt > MAX_RETRIES:
+                            raise RuntimeError(
+                                f"GQL {r.status}: Server error; retry limit exceeded"
+                            )
                         await asyncio.sleep(min(60, 2 ** (attempt - 1)))
                         continue
 
