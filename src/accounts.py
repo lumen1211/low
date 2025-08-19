@@ -18,7 +18,7 @@ def _parse_txt(path: Path) -> list[Account]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split(":")
+        parts = line.split(":", 3)
         if len(parts) < 2:
             continue
         login = parts[0].strip()
