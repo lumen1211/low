@@ -8,16 +8,17 @@ OPS_PATH = Path("ops/ops.json")
 
 # Алиасы для операций GQL: ключ и его взаимозаменяемый вариант.
 ALIASES = {
-    "DropCampaignDetails": "DropsCampaignDetails",
+    "IncrementDropCurrentSessionProgress": "DropCurrentSessionContext",
+    "ClaimDropReward": "DropsPage_ClaimDropRewards",
     "DropsCampaignDetails": "DropCampaignDetails",
 }
 
 REQUIRED = [
     "ViewerDropsDashboard",
+    "DropCampaignDetails",
     "Inventory",
     "DropCurrentSessionContext",
     "DropsPage_ClaimDropRewards",
-    "DropsCampaignDetails",
 ]
 
 logger = logging.getLogger(__name__)
