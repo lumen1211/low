@@ -112,10 +112,7 @@ class TwitchAPI:
 
     async def campaign_details(self, campaign_id: str) -> Any:
         await self.start()
-        try:
-            return await self.gql("DropCampaignDetails", {"campaignID": campaign_id})
-        except RuntimeError:
-            return await self.gql("DropsCampaignDetails", {"campaignID": campaign_id})
+        return await self.gql("DropCampaignDetails", {"campaignID": campaign_id})
 
     async def get_live_channels(self, campaign_id: str) -> list[tuple[str, int, bool]]:
         """
