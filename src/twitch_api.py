@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 from yarl import URL
 
-from .ops import load_ops
+from .ops import load_ops, get_hash
 
 GQL = URL("https://gql.twitch.tv/gql")
 MAX_RETRIES = 5
@@ -46,9 +46,7 @@ class TwitchAPI:
         if not self.session or self.session.closed:
             raise RuntimeError("Session not started; call start() first")
 
-        h = self.ops.get(operation, "")
-        if not h or str(h).startswith("actual_hash"):
-            raise RuntimeError(f"Persisted hash for {operation} not set in ops/ops.json")
+        operation, h = get_hash(self.ops, operation)
 
         payload = {
             "operationName": operation,
@@ -114,7 +112,10 @@ class TwitchAPI:
 
     async def campaign_details(self, campaign_id: str) -> Any:
         await self.start()
-        return await self.gql("DropsCampaignDetails", {"campaignID": campaign_id})
+        try:
+            return await self.gql("DropCampaignDetails", {"campaignID": campaign_id})
+        except RuntimeError:
+            return await self.gql("DropsCampaignDetails", {"campaignID": campaign_id})
 
     async def get_live_channels(self, campaign_id: str) -> list[tuple[str, int, bool]]:
         """
