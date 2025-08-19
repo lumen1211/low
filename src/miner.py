@@ -69,7 +69,8 @@ def _parse_campaigns_from_dashboard(data: Any) -> List[Dict[str, Any]]:
 
 async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, Any]]:
     """
-    Получаем живые каналы по кампании через DropsCampaignDetails.
+    Получаем живые каналы по кампании через DropCampaignDetails
+    (или DropsCampaignDetails).
     Возвращаем список словарей: {name, viewers, live}.
     """
     try:

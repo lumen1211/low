@@ -21,7 +21,8 @@ TXT правила
 Обновление sha256Hash для GQL операций
 Twitch периодически меняет хэши Persisted Query для операций
 ViewerDropsDashboard, Inventory, IncrementDropCurrentSessionProgress,
-ClaimDropReward (и при использовании списка каналов — DropsCampaignDetails).
+ClaimDropReward (и при использовании списка каналов — DropCampaignDetails,
+ранее DropsCampaignDetails).
 При неверных значениях API возвращает ошибку PersistedQueryNotFound.
 
 Откройте https://www.twitch.tv и включите DevTools (вкладка Network, включите Preserve log).

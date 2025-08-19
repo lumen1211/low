@@ -5,6 +5,13 @@ from typing import Dict
 from pathlib import Path
 
 OPS_PATH = Path("ops/ops.json")
+
+# Алиасы для операций GQL: ключ и его взаимозаменяемый вариант.
+ALIASES = {
+    "DropCampaignDetails": "DropsCampaignDetails",
+    "DropsCampaignDetails": "DropCampaignDetails",
+}
+
 REQUIRED = [
     "ViewerDropsDashboard",
     "Inventory",
@@ -26,10 +33,25 @@ def load_ops() -> Dict[str, str]:
         logger.error("Failed to decode OPS file %s: %s", OPS_PATH, exc)
         return {}
 
+def get_hash(ops: dict, op: str) -> tuple[str, str]:
+    """Возвращает имя операции и её hash, учитывая алиасы."""
+    candidates = [op]
+    alias = ALIASES.get(op)
+    if alias:
+        candidates.append(alias)
+
+    for name in candidates:
+        h = ops.get(name, "")
+        if h and not str(h).startswith("actual_hash"):
+            return name, h
+    raise RuntimeError(f"Persisted hash for {op} not set in ops/ops.json")
+
+
 def missing_ops(ops: dict) -> list[str]:
     miss = []
     for k in REQUIRED:
-        v = ops.get(k, "")
-        if not v or v.startswith("actual_hash"):
+        try:
+            get_hash(ops, k)
+        except RuntimeError:
             miss.append(k)
     return miss
