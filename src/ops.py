@@ -5,7 +5,13 @@ from typing import Dict
 from pathlib import Path
 
 OPS_PATH = Path("ops/ops.json")
-REQUIRED = ["ViewerDropsDashboard","Inventory","IncrementDropCurrentSessionProgress","ClaimDropReward"]
+REQUIRED = [
+    "ViewerDropsDashboard",
+    "Inventory",
+    "IncrementDropCurrentSessionProgress",
+    "ClaimDropReward",
+    "DropsCampaignDetails",
+]
 
 logger = logging.getLogger(__name__)
 
