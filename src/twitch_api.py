@@ -96,7 +96,7 @@ class TwitchAPI:
 
     async def viewer_dashboard(self) -> Any:
         await self.start()
-        return await self.gql("ViewerDropsDashboard", {})
+        return await self.gql("ViewerDropsDashboard", {"fetchRewardCampaigns": True})
 
     async def inventory(self) -> Any:
         await self.start()
