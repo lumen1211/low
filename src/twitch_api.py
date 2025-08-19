@@ -102,29 +102,32 @@ class TwitchAPI:
         await self.start()
         return await self.gql("Inventory", {})
 
-    async def increment(self, channel_id: str) -> Any:
+    async def drop_current_session_context(self, channel_login: str, channel_id: str) -> Any:
         await self.start()
-        return await self.gql("DropCurrentSessionContext", {"channelID": channel_id})
+        return await self.gql(
+            "DropCurrentSessionContext",
+            {"channelLogin": channel_login, "channelID": channel_id},
+        )
 
     async def claim(self, drop_instance_id: str) -> Any:
         await self.start()
         return await self.gql(
             "DropsPage_ClaimDropRewards",
-            {"input": {"dropInstanceIDs": [drop_instance_id]}},
+            {"input": {"dropInstanceID": drop_instance_id}},
         )
 
     async def campaign_details(self, campaign_id: str) -> Any:
         await self.start()
         return await self.gql("DropCampaignDetails", {"campaignID": campaign_id})
 
-    async def get_live_channels(self, campaign_id: str) -> list[tuple[str, int, bool]]:
+    async def get_live_channels(self, campaign_id: str) -> list[tuple[str, str, int, bool]]:
         """
         Возвращает список каналов для кампании:
-        [(channel_id_or_login, viewers, is_live), ...]
+        [(channel_login, channel_id, viewers, is_live), ...]
         """
         await self.start()
         data = await self.campaign_details(campaign_id)
-        channels: list[tuple[str, int, bool]] = []
+        channels: list[tuple[str, str, int, bool]] = []
         try:
             d = (data or {}).get("data") or {}
             camp = d.get("campaign") or d.get("dropsCampaign") or {}
@@ -133,11 +136,12 @@ class TwitchAPI:
                 # Twitch может слать либо объект {channel:{...}}, либо плоский объект канала
                 chan = ch.get("channel") if isinstance(ch, dict) else None
                 chan_obj = chan if isinstance(chan, dict) else (ch if isinstance(ch, dict) else {})
-                cid = chan_obj.get("id") or chan_obj.get("login") or ""
+                login = chan_obj.get("login") or chan_obj.get("name") or ""
+                cid = chan_obj.get("id") or ""
                 stream = chan_obj.get("stream") or {}
                 live = bool(stream)
                 viewers = stream.get("viewersCount") or 0
-                channels.append((cid, int(viewers), live))
+                channels.append((login or cid, cid, int(viewers), live))
         except Exception:
             pass
         return channels

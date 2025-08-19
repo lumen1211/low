@@ -74,12 +74,12 @@ async def _initial_channels(api: TwitchAPI, campaign_id: str) -> List[Dict[str, 
     Возвращаем список словарей: {name, viewers, live}.
     """
     try:
-        chans = await api.get_live_channels(campaign_id)  # List[tuple[id_or_login, viewers, live]]
-        chans.sort(key=lambda x: x[1], reverse=True)
+        chans = await api.get_live_channels(campaign_id)  # List[tuple[login, id, viewers, live]]
+        chans.sort(key=lambda x: x[2], reverse=True)
         items: List[Dict[str, Any]] = []
-        for cid_or_login, viewers, live in chans:
+        for clogin, _cid, viewers, live in chans:
             items.append(
-                {"name": str(cid_or_login) or "unknown", "viewers": int(viewers or 0), "live": bool(live)}
+                {"name": str(clogin) or "unknown", "viewers": int(viewers or 0), "live": bool(live)}
             )
         return items
     except Exception:
@@ -166,17 +166,17 @@ async def run_account(
         next_inc = loop.time() + 60.0
         next_inv = loop.time() + random.uniform(120.0, 180.0)
 
-        # numeric channel id для increment (если удастся найти)
-        increment_channel_id: Optional[str] = None
+        # данные канала (login, id) для DropCurrentSessionContext
+        increment_channel: Optional[tuple[str, str]] = None
         try:
             if selected_campaign:
                 live = await api.get_live_channels(selected_campaign["id"])
-                for cid, _v, _live in live:
+                for clogin, cid, _v, _live in live:
                     if isinstance(cid, str) and cid.isdigit():
-                        increment_channel_id = cid
+                        increment_channel = (clogin, cid)
                         break
         except Exception:
-            increment_channel_id = None
+            increment_channel = None
 
         # 4) цикл
         while not stop_evt.is_set():
@@ -200,12 +200,12 @@ async def run_account(
                                     ch_items = [{"name": n, "viewers": 0, "live": False} for n in selected_campaign["channels"]]
                                 await _safe_put(queue, (login, "channels", {"channels": ch_items}))
                                 # переопределим increment канал
-                                increment_channel_id = None
+                                increment_channel = None
                                 try:
                                     live = await api.get_live_channels(selected_campaign["id"])
-                                    for cid, _v, _live in live:
+                                    for clogin, cid, _v, _live in live:
                                         if isinstance(cid, str) and cid.isdigit():
-                                            increment_channel_id = cid
+                                            increment_channel = (clogin, cid)
                                             break
                                 except Exception:
                                     pass
@@ -217,9 +217,10 @@ async def run_account(
                     await _safe_put(queue, (login, "error", {"msg": f"cmd_q error: {e}"}))
 
             # increment раз в ~60 сек
-            if increment_channel_id and now >= next_inc:
+            if increment_channel and now >= next_inc:
                 try:
-                    await api.increment(increment_channel_id)
+                    clogin, cid = increment_channel
+                    await api.drop_current_session_context(clogin, cid)
                 except Exception as e:
                     await _safe_put(queue, (login, "error", {"msg": f"increment error: {e}"}))
                 next_inc = now + 60.0
