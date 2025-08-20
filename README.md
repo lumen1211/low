@@ -35,6 +35,18 @@ DropsPage_ClaimDropRewards (и при использовании списка к
 
 Перезапустите приложение.
 
+Обновление Client-Version и Client-Integrity
+Twitch может менять значения заголовков `Client-Version` и `Client-Integrity`,
+используемых в GQL запросах. После получения cookies запустите:
+
+```bash
+python scripts/update_ci.py --accounts accounts.txt
+```
+
+Скрипт откроет страницу Drops в headless браузере, перехватит первый запрос
+`https://gql.twitch.tv/gql` и сохранит найденные значения в `ci/<login>.json`.
+Эти файлы автоматически подхватываются при запуске приложения.
+
 Поведение при rate limit
 При ответе Twitch API 429 Too Many Requests запрос автоматически повторяется
 с экспоненциальной задержкой до 5 раз. Если лимит попыток исчерпан, выбрасывается
