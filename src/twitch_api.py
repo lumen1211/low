@@ -19,10 +19,14 @@ class TwitchAPI:
         auth_token: str,
         client_id: str = "kimne78kx3ncx6brgo4mv6wki5h1ko",
         proxy: str = "",
+        client_version: str = "",
+        client_integrity: str = "",
     ):
         self.auth = auth_token
         self.client_id = client_id
         self.proxy = proxy or None  # прокси указываем на уровне запроса
+        self.client_version = client_version
+        self.client_integrity = client_integrity
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
         self.ua = (
@@ -57,15 +61,20 @@ class TwitchAPI:
         attempt = 0
         while True:
             try:
+                headers = {
+                    "Client-ID": self.client_id,
+                    "Authorization": f"OAuth {self.auth}",
+                    "Content-Type": "application/json",
+                }
+                if self.client_version:
+                    headers["Client-Version"] = self.client_version
+                if self.client_integrity:
+                    headers["Client-Integrity"] = self.client_integrity
                 async with self.session.post(
                     GQL,
                     json=payload,
                     proxy=self.proxy,  # прокси на уровне запроса
-                    headers={
-                        "Client-ID": self.client_id,
-                        "Authorization": f"OAuth {self.auth}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                 ) as r:
                     if r.status == 429:
                         attempt += 1

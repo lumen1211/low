@@ -9,6 +9,8 @@ class Account:
     password: str = ""
     proxy: str = ""
     totp_secret: str = ""
+    client_version: str = ""
+    client_integrity: str = ""
     status: str = "Idle"
     note: str = ""
     # ID выбранной кампании (для GQL-трекера)

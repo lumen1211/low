@@ -406,7 +406,17 @@ class MainWindow(QMainWindow):
         self.stops[login] = stop
         cmd_q: asyncio.Queue = asyncio.Queue()
         self.cmds[login] = cmd_q
-        t = self.loop.create_task(run_account(login, acc.proxy, self.queue, stop, cmd_q))
+        t = self.loop.create_task(
+            run_account(
+                login,
+                acc.proxy,
+                self.queue,
+                stop,
+                cmd_q,
+                acc.client_version,
+                acc.client_integrity,
+            )
+        )
         self.tasks[login] = t
         acc.status = "Running"
         r = self.row_of(login)
