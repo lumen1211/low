@@ -117,6 +117,8 @@ async def run_account(
     queue: asyncio.Queue,
     stop_evt: asyncio.Event,
     cmd_q: Optional[asyncio.Queue] = None,
+    client_version: str = "",
+    client_integrity: str = "",
 ):
     """
     Воркер для одного аккаунта:
@@ -134,7 +136,12 @@ async def run_account(
         await _safe_put(queue, (login, "status", {"status": "Stopped"}))
         return
 
-    api = TwitchAPI(token, proxy=proxy or "")
+    api = TwitchAPI(
+        token,
+        proxy=proxy or "",
+        client_version=client_version or "",
+        client_integrity=client_integrity or "",
+    )
     await api.start()
     await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
 

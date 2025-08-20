@@ -9,6 +9,8 @@ from .types import Account
 
 COOKIES_DIR = Path("cookies")
 COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+CI_DIR = Path("ci")
+CI_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,20 @@ def _parse_txt(path: Path) -> list[Account]:
         login = parts[0].strip()
         password = parts[1]
         totp = parts[2] if len(parts) >= 3 else ""
-        proxy = parts[3] if len(parts) >= 4 else ""
+        rest = parts[3] if len(parts) >= 4 else ""
+        proxy = rest
+        client_version = ""
+        client_integrity = ""
+        if rest:
+            rparts = rest.rsplit(":", 2)
+            if len(rparts) == 3:
+                maybe_proxy, maybe_cv, maybe_ci = rparts
+                if "/" not in maybe_cv and "/" not in maybe_ci and "@" not in maybe_cv and "@" not in maybe_ci:
+                    proxy, client_version, client_integrity = maybe_proxy, maybe_cv, maybe_ci
+            elif len(rparts) == 2:
+                maybe_proxy, maybe_ci = rparts
+                if "/" not in maybe_ci and "@" not in maybe_ci:
+                    proxy, client_integrity = maybe_proxy, maybe_ci
         res.append(
             Account(
                 label=login,
@@ -32,6 +47,8 @@ def _parse_txt(path: Path) -> list[Account]:
                 password=password,
                 proxy=proxy,
                 totp_secret=totp,
+                client_version=client_version,
+                client_integrity=client_integrity,
             )
         )
     return res
@@ -49,16 +66,60 @@ def _parse_csv(path: Path) -> list[Account]:
                     password=(row.get("password") or "").strip(),
                     proxy=(row.get("proxy") or "").strip(),
                     totp_secret=(row.get("totp_secret") or "").strip(),
+                    client_version=(
+                        row.get("client_version")
+                        or row.get("Client-Version")
+                        or ""
+                    ).strip(),
+                    client_integrity=(
+                        row.get("client_integrity")
+                        or row.get("Client-Integrity")
+                        or ""
+                    ).strip(),
                 )
             )
     return [a for a in res if a.login]
 
 
+def _load_ci(login: str) -> tuple[str, str]:
+    p = CI_DIR / f"{login}.json"
+    if not p.exists():
+        return "", ""
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        cv = (
+            data.get("client_version")
+            or data.get("Client-Version")
+            or data.get("clientVersion")
+            or data.get("client-version")
+            or ""
+        )
+        ci = (
+            data.get("client_integrity")
+            or data.get("Client-Integrity")
+            or data.get("clientIntegrity")
+            or data.get("client-integrity")
+            or ""
+        )
+        return str(cv), str(ci)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.error("Failed to load client integrity for %s: %s", login, e)
+        return "", ""
+
+
 def load_accounts(path: Path) -> list[Account]:
     ext = path.suffix.lower()
     if ext == ".txt":
-        return _parse_txt(path)
-    return _parse_csv(path)
+        accs = _parse_txt(path)
+    else:
+        accs = _parse_csv(path)
+    for a in accs:
+        cv, ci = _load_ci(a.login)
+        if not a.client_version:
+            a.client_version = cv
+        if not a.client_integrity:
+            a.client_integrity = ci
+    return accs
 
 
 def auth_token_from_cookies(login: str) -> Optional[str]:
