@@ -147,3 +147,111 @@ def test_challenge_refreshes_tokens(monkeypatch):
 
     assert calls[1]["Client-Version"] == "cv2"
     assert calls[1]["Client-Integrity"] == "ci2"
+
+
+def test_gql_reloads_hash_on_persisted_query_not_found(monkeypatch):
+    api = TwitchAPI("token")
+    api.ops = {"ViewerDropsDashboard": "0" * 64}
+
+    class DummyResp:
+        def __init__(self, data):
+            self.status = 200
+            self._data = data
+
+        async def json(self):
+            return self._data
+
+        async def text(self):
+            return str(self._data)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    payloads = []
+
+    def post(url, json=None, proxy=None, headers=None):
+        from copy import deepcopy
+
+        payloads.append(deepcopy(json))
+        if len(payloads) == 1:
+            return DummyResp({"errors": [{"message": "PersistedQueryNotFound"}]})
+        return DummyResp({"data": {}})
+
+    class DummySession:
+        closed = False
+
+        def post(self, *a, **kw):
+            return post(*a, **kw)
+
+    async def fake_start():
+        api.session = DummySession()
+
+    monkeypatch.setattr(api, "start", fake_start)
+    monkeypatch.setattr(twitch_api, "load_ops", lambda: {"ViewerDropsDashboard": "1" * 64})
+
+    async def fake_refresh_ci():
+        return False
+
+    monkeypatch.setattr(api, "_refresh_ci", fake_refresh_ci)
+
+    asyncio.run(api.viewer_dashboard())
+
+    assert payloads[0]["extensions"]["persistedQuery"]["sha256Hash"] == "0" * 64
+    assert payloads[1]["extensions"]["persistedQuery"]["sha256Hash"] == "1" * 64
+
+
+def test_gql_sends_query_when_available(monkeypatch):
+    api = TwitchAPI("token")
+    api.ops = {"ViewerDropsDashboard": "0" * 64}
+
+    class DummyResp:
+        def __init__(self, data):
+            self.status = 200
+            self._data = data
+
+        async def json(self):
+            return self._data
+
+        async def text(self):
+            return str(self._data)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    payloads = []
+
+    def post(url, json=None, proxy=None, headers=None):
+        from copy import deepcopy
+
+        payloads.append(deepcopy(json))
+        if len(payloads) == 1:
+            return DummyResp({"errors": [{"message": "PersistedQueryNotFound"}]})
+        return DummyResp({"data": {}})
+
+    class DummySession:
+        closed = False
+
+        def post(self, *a, **kw):
+            return post(*a, **kw)
+
+    async def fake_start():
+        api.session = DummySession()
+
+    monkeypatch.setattr(api, "start", fake_start)
+    monkeypatch.setattr(twitch_api, "load_ops", lambda: {"ViewerDropsDashboard": "query q"})
+
+    async def fake_refresh_ci2():
+        return False
+
+    monkeypatch.setattr(api, "_refresh_ci", fake_refresh_ci2)
+
+    asyncio.run(api.viewer_dashboard())
+
+    assert "query" in payloads[1]
+    assert "extensions" not in payloads[1]

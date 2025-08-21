@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from typing import Any, Dict, Optional, Tuple
@@ -14,6 +15,8 @@ from .client_integrity import fetch_ci, save_ci
 
 GQL = URL("https://gql.twitch.tv/gql")
 MAX_RETRIES = 5
+
+logger = logging.getLogger(__name__)
 
 
 class TwitchAPI:
@@ -88,6 +91,7 @@ class TwitchAPI:
         }
 
         attempt = 0
+        pq_retry = False
         while True:
             if not self.client_version or not self.client_integrity:
                 await self._refresh_ci()
@@ -134,6 +138,22 @@ class TwitchAPI:
                         if isinstance(data, list):
                             data = data[0]
                         if isinstance(data, dict) and data.get("errors"):
+                            err = data.get("errors") or []
+                            msg = err[0].get("message") if err else ""
+                            if msg == "PersistedQueryNotFound" and not pq_retry:
+                                logger.warning("PersistedQueryNotFound for %s", operation)
+                                pq_retry = True
+                                self.ops = load_ops()
+                                operation, new_val = get_hash(self.ops, operation)
+                                payload["operationName"] = operation
+                                if re.fullmatch(r"[0-9a-fA-F]{64}", str(new_val)):
+                                    payload.setdefault("extensions", {}).setdefault(
+                                        "persistedQuery", {"version": 1}
+                                    )["sha256Hash"] = new_val
+                                else:
+                                    payload.pop("extensions", None)
+                                    payload["query"] = new_val
+                                continue
                             raise RuntimeError(str(data["errors"]))
                         return data
 
