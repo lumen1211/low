@@ -9,6 +9,7 @@ import aiohttp
 from yarl import URL
 
 from .ops import load_ops, get_hash
+from .client_integrity import fetch_ci, save_ci
 
 GQL = URL("https://gql.twitch.tv/gql")
 MAX_RETRIES = 5
@@ -22,12 +23,14 @@ class TwitchAPI:
         proxy: str = "",
         client_version: str = "",
         client_integrity: str = "",
+        login: str = "",
     ):
         self.auth = auth_token
         self.client_id = client_id
         self.proxy = proxy or None  # прокси указываем на уровне запроса
         self.client_version = client_version
         self.client_integrity = client_integrity
+        self.login = login
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
         self.ua = (
@@ -46,6 +49,18 @@ class TwitchAPI:
         if self.session and not self.session.closed:
             await self.session.close()
 
+    async def _refresh_ci(self) -> bool:
+        """Fetch and save new Client-Version/Client-Integrity."""
+        if not self.login:
+            return False
+        cv, ci = await fetch_ci(self.login, self.proxy or "")
+        if cv and ci:
+            self.client_version = cv
+            self.client_integrity = ci
+            save_ci(self.login, cv, ci)
+            return True
+        return False
+
     async def gql(self, operation: str, variables: Dict[str, Any]) -> Any:
         """Вызов Twitch GQL с persistedQuery hash из ops.json, с ретраями на 429/сетевых ошибках."""
         if not self.session or self.session.closed:
@@ -61,6 +76,8 @@ class TwitchAPI:
 
         attempt = 0
         while True:
+            if not self.client_version or not self.client_integrity:
+                await self._refresh_ci()
             try:
                 headers = {
                     "Client-ID": self.client_id,
@@ -103,6 +120,19 @@ class TwitchAPI:
                         if isinstance(data, dict) and data.get("errors"):
                             raise RuntimeError(str(data["errors"]))
                         return data
+
+                    if 400 <= r.status < 500:
+                        text = await r.text()
+                        if "integrity" in text.lower():
+                            refreshed = await self._refresh_ci()
+                            if refreshed:
+                                attempt += 1
+                                if attempt > MAX_RETRIES:
+                                    raise RuntimeError(
+                                        "GQL integrity challenge; retry limit exceeded"
+                                    )
+                                continue
+                        raise RuntimeError(f"GQL {r.status}: {text}")
 
                     text = await r.text()
                     raise RuntimeError(f"GQL {r.status}: {text}")

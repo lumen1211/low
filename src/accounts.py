@@ -6,11 +6,8 @@ import json
 import logging
 
 from .types import Account
+from .client_integrity import COOKIES_DIR, CI_DIR, load_ci
 
-COOKIES_DIR = Path("cookies")
-COOKIES_DIR.mkdir(parents=True, exist_ok=True)
-CI_DIR = Path("ci")
-CI_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger(__name__)
 
 
@@ -79,34 +76,6 @@ def _parse_csv(path: Path) -> list[Account]:
                 )
             )
     return [a for a in res if a.login]
-
-
-def _load_ci(login: str) -> tuple[str, str]:
-    p = CI_DIR / f"{login}.json"
-    if not p.exists():
-        return "", ""
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        cv = (
-            data.get("client_version")
-            or data.get("Client-Version")
-            or data.get("clientVersion")
-            or data.get("client-version")
-            or ""
-        )
-        ci = (
-            data.get("client_integrity")
-            or data.get("Client-Integrity")
-            or data.get("clientIntegrity")
-            or data.get("client-integrity")
-            or ""
-        )
-        return str(cv), str(ci)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logger.error("Failed to load client integrity for %s: %s", login, e)
-        return "", ""
-
-
 def load_accounts(path: Path) -> list[Account]:
     ext = path.suffix.lower()
     if ext == ".txt":
@@ -114,7 +83,7 @@ def load_accounts(path: Path) -> list[Account]:
     else:
         accs = _parse_csv(path)
     for a in accs:
-        cv, ci = _load_ci(a.login)
+        cv, ci = load_ci(a.login)
         if not a.client_version:
             a.client_version = cv
         if not a.client_integrity:
