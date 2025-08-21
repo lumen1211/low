@@ -64,3 +64,52 @@ def test_headers_include_ci_tokens(monkeypatch):
     asyncio.run(api.viewer_dashboard())
     assert captured.get("Client-Version") == "cv"
     assert captured.get("Client-Integrity") == "ci"
+
+
+def test_challenge_refreshes_tokens(monkeypatch):
+    calls = []
+    api = TwitchAPI("token", login="user", client_version="old", client_integrity="bad")
+
+    class DummyResp:
+        def __init__(self, status, text=""):
+            self.status = status
+            self._text = text
+
+        async def json(self):
+            return {}
+
+        async def text(self):
+            return self._text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    def post(url, json=None, proxy=None, headers=None):
+        calls.append(headers)
+        if len(calls) == 1:
+            return DummyResp(400, "integrity challenge")
+        return DummyResp(200, "{}")
+
+    class DummySession:
+        closed = False
+
+        def post(self, *a, **kw):
+            return post(*a, **kw)
+
+    async def fake_start():
+        api.session = DummySession()
+
+    async def fake_fetch_ci(login, proxy=""):
+        return "cv2", "ci2"
+
+    monkeypatch.setattr(api, "start", fake_start)
+    monkeypatch.setattr(twitch_api, "fetch_ci", fake_fetch_ci)
+    monkeypatch.setattr(twitch_api, "save_ci", lambda *a, **kw: None)
+
+    asyncio.run(api.viewer_dashboard())
+
+    assert calls[1]["Client-Version"] == "cv2"
+    assert calls[1]["Client-Integrity"] == "ci2"

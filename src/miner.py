@@ -141,6 +141,7 @@ async def run_account(
         proxy=proxy or "",
         client_version=client_version or "",
         client_integrity=client_integrity or "",
+        login=login,
     )
     await api.start()
     await _safe_put(queue, (login, "status", {"status": "Querying", "note": "Fetching campaigns"}))
