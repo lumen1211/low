@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -119,6 +118,7 @@ async def run_account(
     cmd_q: Optional[asyncio.Queue] = None,
     client_version: str = "",
     client_integrity: str = "",
+    tick_interval: float = 60.0,
 ):
     """
     Воркер для одного аккаунта:
@@ -170,11 +170,12 @@ async def run_account(
 
         # 3) периодика: increment + inventory
         loop = asyncio.get_event_loop()
-        next_inc = loop.time() + 60.0
-        next_inv = loop.time() + random.uniform(120.0, 180.0)
+        next_tick = loop.time() + tick_interval
 
         # данные канала (login, id) для DropCurrentSessionContext
         increment_channel: Optional[tuple[str, str]] = None
+        spade_url = ""
+        hls_url = ""
         try:
             if selected_campaign:
                 live = await api.get_live_channels(selected_campaign["id"])
@@ -185,6 +186,12 @@ async def run_account(
         except Exception:
             increment_channel = None
 
+        if increment_channel:
+            try:
+                spade_url, hls_url = await api.get_spade_and_hls(increment_channel[0])
+            except Exception:
+                spade_url = ""
+                hls_url = ""
         # 4) цикл
         while not stop_evt.is_set():
             now = loop.time()
@@ -223,17 +230,26 @@ async def run_account(
                 except Exception as e:
                     await _safe_put(queue, (login, "error", {"msg": f"cmd_q error: {e}"}))
 
-            # increment раз в ~60 сек
-            if increment_channel and now >= next_inc:
-                try:
-                    clogin, cid = increment_channel
-                    await api.drop_current_session_context(clogin, cid)
-                except Exception as e:
-                    await _safe_put(queue, (login, "error", {"msg": f"increment error: {e}"}))
-                next_inc = now + 60.0
+            if now >= next_tick:
+                if increment_channel:
+                    try:
+                        clogin, cid = increment_channel
+                        await api.drop_current_session_context(clogin, cid)
+                    except Exception as e:
+                        await _safe_put(queue, (login, "error", {"msg": f"increment error: {e}"}))
 
-            # inventory с джиттером
-            if now >= next_inv:
+                if spade_url:
+                    try:
+                        await api.spade_minute_watched(spade_url)
+                    except Exception as e:
+                        await _safe_put(queue, (login, "error", {"msg": f"spade error: {e}"}))
+
+                if hls_url:
+                    try:
+                        await api.head_hls(hls_url)
+                    except Exception as e:
+                        await _safe_put(queue, (login, "error", {"msg": f"hls error: {e}"}))
+
                 try:
                     inv = await api.inventory()
                     drop = _extract_time_based_drop(inv)
@@ -261,7 +277,7 @@ async def run_account(
                 except Exception as e:
                     await _safe_put(queue, (login, "error", {"msg": f"inventory error: {e}"}))
                 finally:
-                    next_inv = now + random.uniform(120.0, 180.0)
+                    next_tick = now + tick_interval
 
             await asyncio.sleep(0.5)
 

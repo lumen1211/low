@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 from yarl import URL
@@ -165,3 +166,43 @@ class TwitchAPI:
         except Exception:
             pass
         return channels
+
+    async def get_spade_and_hls(self, channel_login: str) -> Tuple[str, str]:
+        await self.start()
+        url = URL(f"https://www.twitch.tv/{channel_login}")
+        spade = ""
+        hls = ""
+        try:
+            async with self.session.get(url, proxy=self.proxy) as r:
+                text = await r.text()
+            m = re.search(r"\"spade_url\"\s*:\s*\"([^\"]+)\"", text)
+            if m:
+                spade = m.group(1).encode().decode("unicode_escape")
+            m = re.search(r"\"hls_url\"\s*:\s*\"([^\"]+)\"", text) or re.search(
+                r"\"playbackUrl\"\s*:\s*\"([^\"]+)\"", text
+            )
+            if m:
+                hls = m.group(1).encode().decode("unicode_escape")
+        except Exception:
+            pass
+        return spade, hls
+
+    async def spade_minute_watched(self, url: str) -> None:
+        await self.start()
+        async with self.session.get(URL(url), proxy=self.proxy):
+            pass
+
+    async def head_hls(self, playlist_url: str) -> None:
+        await self.start()
+        async with self.session.get(URL(playlist_url), proxy=self.proxy) as r:
+            text = await r.text()
+        last = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                last = line
+        if last:
+            base = URL(playlist_url)
+            seg_url = base.join(URL(last))
+            async with self.session.head(seg_url, proxy=self.proxy):
+                pass
