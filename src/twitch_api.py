@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
@@ -24,6 +25,9 @@ class TwitchAPI:
         client_version: str = "",
         client_integrity: str = "",
         login: str = "",
+        x_device_id: str = "",
+        client_session_id: str = "",
+        playback_session_id: str = "",
     ):
         self.auth = auth_token
         self.client_id = client_id
@@ -31,6 +35,9 @@ class TwitchAPI:
         self.client_version = client_version
         self.client_integrity = client_integrity
         self.login = login
+        self.x_device_id = x_device_id or uuid.uuid4().hex
+        self.client_session_id = client_session_id or uuid.uuid4().hex
+        self.playback_session_id = playback_session_id or uuid.uuid4().hex
         self.session: Optional[aiohttp.ClientSession] = None
         self.ops = load_ops()
         self.ua = (
@@ -38,6 +45,12 @@ class TwitchAPI:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         )
+
+    def reset_session_ids(self) -> None:
+        """Generate new device and session identifiers."""
+        self.x_device_id = uuid.uuid4().hex
+        self.client_session_id = uuid.uuid4().hex
+        self.playback_session_id = uuid.uuid4().hex
 
     async def start(self) -> None:
         if not self.session or self.session.closed:
@@ -84,6 +97,9 @@ class TwitchAPI:
                     "Authorization": f"OAuth {self.auth}",
                     "Content-Type": "application/json",
                 }
+                headers["X-Device-Id"] = self.x_device_id
+                headers["Client-Session-Id"] = self.client_session_id
+                headers["Playback-Session-Id"] = self.playback_session_id
                 if self.client_version:
                     headers["Client-Version"] = self.client_version
                 if self.client_integrity:
@@ -219,7 +235,13 @@ class TwitchAPI:
 
     async def spade_minute_watched(self, url: str) -> None:
         await self.start()
-        async with self.session.get(URL(url), proxy=self.proxy):
+        u = URL(url)
+        qs = dict(u.query)
+        qs.setdefault("X-Device-Id", self.x_device_id)
+        qs.setdefault("Client-Session-Id", self.client_session_id)
+        qs.setdefault("Playback-Session-Id", self.playback_session_id)
+        u = u.update_query(qs)
+        async with self.session.get(u, proxy=self.proxy):
             pass
 
     async def head_hls(self, playlist_url: str) -> None:
